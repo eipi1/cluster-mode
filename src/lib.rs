@@ -1,6 +1,33 @@
-#![allow(dead_code)]
+//! Create and manage distributed applications in Rust.
+//!
+//! Built with the motto - *Plug the crate in, it'll be taken care of.*
+//!
+//! ## Usage
+//! ```rust
+//! # use cloud_discovery_kubernetes::KubernetesDiscoverService;
+//! # use std::sync::Arc;
+//! # use rust_cloud_discovery::DiscoveryClient;
+//! # use cluster_mode::{start_cluster, Cluster};
+//! # #[tokio::main]
+//! # async fn main() {
+//!     let result = KubernetesDiscoverService::init("demo".to_string(), "default".to_string())
+//!         .await;
+//!     if let Ok(k8s) = result {
+//!         let cluster = Arc::new(Cluster::default());
+//!         let client = DiscoveryClient::new(k8s);
+//!         tokio::spawn(start_cluster(cluster, client));
+//!     }
+//! # }
+//! ```
+//! The `Cluster` struct provides a set of functions for example `async fn primaries(&self) -> Option<HashSet<RestClusterNode>>`
+//! or `async fn is_active(&self) -> bool` to communicate with the cluster.
+//!
+//! Checkout [Cluster] for more details
+//!
 
+#![warn(missing_docs)]
 #[macro_export]
+#[doc(hidden)]
 macro_rules! log_error {
     ($result:expr) => {
         if let Err(e) = $result {
@@ -42,19 +69,31 @@ pub enum InstanceMode {
     Secondary,
 }
 
+#[allow(dead_code)]
+/// Describes a cluster, including operating mode, primaries & secondaries
 pub struct Cluster {
+    /// Identifier of current node, UUID String
     self_id: String,
+    /// Mode of the cluster
     mode: RwLock<InstanceMode>,
+    /// Interval between discovery service call, in milliseconds
     update_interval: u64,
+    /// [ServiceInstance] representing current cluster node
     self_: RwLock<Option<ServiceInstance>>,
+    /// List of primaries
     primaries: RwLock<HashSet<RestClusterNode>>,
+    /// List of Secondaries
     secondaries: RwLock<Arc<HashSet<RestClusterNode>>>,
     /// how many primaries
     n_primary: usize,
+    /// MPSC channel [Sender<Message<T>>] to communicate with Raft
     raft_tx: RwLock<Option<Sender<Message<RestClusterNode>>>>,
 }
 
 impl Cluster {
+    /// Initialize `Cluster`
+    /// # Arguments
+    /// * update_interval - milliseconds, Interval between discovery service call
     pub fn new(update_interval: u64) -> Self {
         Cluster {
             update_interval,
@@ -63,15 +102,17 @@ impl Cluster {
     }
 
     #[doc(hidden)]
-    pub fn _new(mode: InstanceMode, secondaries: HashSet<RestClusterNode>) -> Self{
-        Cluster{
-            mode:RwLock::new(mode),
+    /// For testing purpose
+    pub fn _new(mode: InstanceMode, secondaries: HashSet<RestClusterNode>) -> Self {
+        Cluster {
+            mode: RwLock::new(mode),
             secondaries: RwLock::new(Arc::new(secondaries)),
             ..Default::default()
         }
-
     }
 
+    /// Get the list of secondaries. Returns `None` if Cluster is inactive or in
+    /// [Secondary](InstanceMode::Secondary) mode. List can be empty.
     pub async fn secondaries(&self) -> Option<Arc<HashSet<RestClusterNode>>> {
         if self.is_primary().await {
             let guard = self.secondaries.read().await;
@@ -82,6 +123,8 @@ impl Cluster {
         }
     }
 
+    /// Get the list of primaries. Returns `None` if Cluster is inactive or in
+    /// [Primary](InstanceMode::Primary) mode. List can be empty.
     pub async fn primaries(&self) -> Option<HashSet<RestClusterNode>> {
         if self.is_secondary().await {
             let guard = self.primaries.read().await;
@@ -92,24 +135,28 @@ impl Cluster {
         }
     }
 
+    /// true if Cluster mode is [Primary](InstanceMode::Primary)
     #[inline]
     pub async fn is_primary(&self) -> bool {
         let guard = self.mode.read().await;
         matches!(*guard, InstanceMode::Primary)
     }
 
+    /// true if Cluster mode is [Secondary](InstanceMode::Secondary)
     #[inline]
     pub async fn is_secondary(&self) -> bool {
         let guard = self.mode.read().await;
         matches!(*guard, InstanceMode::Secondary)
     }
 
+    /// true if Cluster mode is not [Inactive](InstanceMode::Inactive)
     #[inline]
     pub async fn is_active(&self) -> bool {
         let guard = self.mode.read().await;
         !matches!(*guard, InstanceMode::Inactive)
     }
 
+    /// Forward [almost_raft::Message::RequestVote] message to Raft process
     pub async fn accept_raft_request_vote(&self, requester_node_id: String, term: usize) {
         self.send_message_to_raft(Message::RequestVote {
             term,
@@ -118,11 +165,13 @@ impl Cluster {
         .await;
     }
 
+    /// Forward [almost_raft::Message::RequestVoteResponse] message to Raft process
     pub async fn accept_raft_request_vote_resp(&self, term: usize, vote: bool) {
         self.send_message_to_raft(Message::RequestVoteResponse { term, vote })
             .await;
     }
 
+    /// Forward [almost_raft::Message::HeartBeat] message to Raft process
     pub async fn accept_raft_heartbeat(&self, leader_node_id: String, term: usize) {
         self.send_message_to_raft(Message::HeartBeat {
             leader_node_id,
@@ -160,6 +209,7 @@ impl Default for Cluster {
     }
 }
 
+/// Start the cluster. Note that, this function has infinite loop, so should always spawn a new thread.
 pub async fn start_cluster<T: DiscoveryService>(
     cluster: Arc<Cluster>,
     discovery_service: DiscoveryClient<T>,
@@ -293,7 +343,11 @@ pub async fn start_cluster<T: DiscoveryService>(
                     }
                 }
                 Err(err) => {
-                    error!("[node: {}] error getting cluster info: {}", &cluster.self_id, err.to_string());
+                    error!(
+                        "[node: {}] error getting cluster info: {}",
+                        &cluster.self_id,
+                        err.to_string()
+                    );
                 }
             }
         }
@@ -332,7 +386,11 @@ pub async fn start_cluster<T: DiscoveryService>(
                 }
             }
             {
-                trace!("[node: {}] updating secondaries to: {:?}", &cluster.self_id, &current);
+                trace!(
+                    "[node: {}] updating secondaries to: {:?}",
+                    &cluster.self_id,
+                    &current
+                );
                 let mut write_guard = cluster.secondaries.write().await;
                 *write_guard = Arc::new(current);
             }
@@ -388,6 +446,7 @@ async fn handle_control_message_from_raft(
     }
 }
 
+/// Returns selective information on current cluster
 pub async fn get_cluster_info(cluster: Arc<Cluster>) -> ClusterInfo {
     let node = {
         let guard = cluster.self_.read().await;
@@ -400,13 +459,24 @@ pub async fn get_cluster_info(cluster: Arc<Cluster>) -> ClusterInfo {
     }
 }
 
+/// Describe cluster
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClusterInfo {
+    /// Cluster node id, UUID
     pub node_id: String,
+    /// [ServiceInstance] representing current node
     pub instance: Option<ServiceInstance>,
+    /// Interval between discovery service call, in milliseconds
     pub update_interval: u64,
 }
 
+/// An implementation of [almost_raft::Node]
+///
+/// `RestClusterNode` uses REST API to communicate with other cluster nodes. User of the crate
+/// *must* provide the following endpoints
+/// * /cluster/raft/request-vote/{requester_node_id:string}/{term:uint32}
+/// * /cluster/raft/vote/{term:uint32}/{true|false}
+/// * /cluster/raft/beat/{leader_node_id:string}/{term:uint32}
 #[derive(Debug, Clone)]
 pub struct RestClusterNode {
     pub(crate) node_id: String,
@@ -414,6 +484,10 @@ pub struct RestClusterNode {
 }
 
 impl RestClusterNode {
+    /// Create new instance
+    /// # Arguments
+    /// * node_id - Unique identifier, better be UUID
+    /// * instance - [ServiceInstance](rust_cloud_discovery::ServiceInstance) of the node
     pub fn new(node_id: String, instance: ServiceInstance) -> Self {
         Self {
             node_id,
@@ -421,15 +495,12 @@ impl RestClusterNode {
         }
     }
 
+    /// Get the instance represented by discovery service
     pub fn service_instance(&self) -> &ServiceInstance {
         &self.inner
     }
 
-    pub(crate) async fn send_request_vote(
-        &self,
-        node_id: String,
-        term: usize,
-    ) -> anyhow::Result<()> {
+    async fn send_request_vote(&self, node_id: String, term: usize) -> anyhow::Result<()> {
         self.send_raft_request(format!(
             "{}{}/{}/{}",
             self.inner.uri().clone().unwrap(),
@@ -440,11 +511,7 @@ impl RestClusterNode {
         .await
     }
 
-    pub(crate) async fn send_request_vote_response(
-        &self,
-        vote: bool,
-        term: usize,
-    ) -> anyhow::Result<()> {
+    async fn send_request_vote_response(&self, vote: bool, term: usize) -> anyhow::Result<()> {
         self.send_raft_request(format!(
             "{}{}/{}/{}",
             self.inner.uri().clone().unwrap(),
@@ -455,11 +522,7 @@ impl RestClusterNode {
         .await
     }
 
-    pub(crate) async fn send_heartbeat(
-        &self,
-        leader_node_id: String,
-        term: usize,
-    ) -> anyhow::Result<()> {
+    async fn send_heartbeat(&self, leader_node_id: String, term: usize) -> anyhow::Result<()> {
         self.send_raft_request(format!(
             "{}{}/{}/{}",
             self.inner.uri().clone().unwrap(),
@@ -567,14 +630,13 @@ mod test {
 
     #[tokio::test]
     async fn test_cluster_impl() {
-        let result = KubernetesDiscoverService::init("overload".to_string(), "default".to_string())
-            .await;
+        let result =
+            KubernetesDiscoverService::init("overload".to_string(), "default".to_string()).await;
         if let Ok(k8s) = result {
             let cluster = Arc::new(Cluster::default());
             let client = DiscoveryClient::new(k8s);
             tokio::spawn(start_cluster(cluster, client));
         }
-
     }
     #[test]
     fn misc() {}
