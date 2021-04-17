@@ -8,7 +8,7 @@
 //! # use std::sync::Arc;
 //! # use rust_cloud_discovery::DiscoveryClient;
 //! # use cluster_mode::{start_cluster, Cluster};
-//! # #[tokio::main]
+//! # #[tokio::main(flavor="current_thread")]
 //! # async fn main() {
 //!     let result = KubernetesDiscoverService::init("demo".to_string(), "default".to_string())
 //!         .await;
