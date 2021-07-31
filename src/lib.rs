@@ -50,6 +50,8 @@ use log::{debug, error, info, trace};
 use rust_cloud_discovery::{DiscoveryClient, DiscoveryService, ServiceInstance};
 use serde::{Deserialize, Serialize};
 
+use hyper_tls::HttpsConnector;
+use native_tls::TlsConnector;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::result::Result::Err;
@@ -240,7 +242,7 @@ pub async fn start_cluster<T: DiscoveryService>(
 
     let mut remaining_update_interval = cluster.update_interval;
 
-    let client = Client::new();
+    let client = build_client();
 
     //todo reconfirm if map is needed or only set of node id is enough
     // map of service instance_id, RestClusterNode
@@ -398,8 +400,20 @@ pub async fn start_cluster<T: DiscoveryService>(
     }
 }
 
+fn build_client() -> Client<HttpsConnector<HttpConnector>> {
+    let tls = TlsConnector::builder()
+        .danger_accept_invalid_hostnames(true)
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
+    let mut http_connector = HttpConnector::new();
+    http_connector.enforce_http(false);
+    let connector = HttpsConnector::from((http_connector, tls.into()));
+    Client::builder().build(connector)
+}
+
 async fn send_request(
-    client: &Client<HttpConnector>,
+    client: &Client<HttpsConnector<HttpConnector>>,
     request: Result<Request<Body>, Error>,
     instance: ServiceInstance,
 ) -> anyhow::Result<(Bytes, ServiceInstance)> {
@@ -623,8 +637,9 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::{start_cluster, Cluster};
+    use crate::{build_client, start_cluster, Cluster};
     use cloud_discovery_kubernetes::KubernetesDiscoverService;
+    use hyper::{Body, Request};
     use rust_cloud_discovery::DiscoveryClient;
     use std::sync::Arc;
 
@@ -638,6 +653,40 @@ mod test {
             tokio::spawn(start_cluster(cluster, client));
         }
     }
-    #[test]
-    fn misc() {}
+
+    #[tokio::test]
+    async fn client_test_http() {
+        let client = build_client();
+        let req = Request::builder()
+            .uri("http://httpbin.org/get")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let resp = client.request(req).await;
+        assert!(resp.is_ok());
+    }
+
+    #[tokio::test]
+    async fn client_test_https() {
+        let client = build_client();
+        let req = Request::builder()
+            .uri("https://httpbin.org/get")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let resp = client.request(req).await;
+        assert!(resp.is_ok());
+    }
+
+    #[tokio::test]
+    async fn client_test_self_signed() {
+        let client = build_client();
+        let req = Request::builder()
+            .uri("https://self-signed.badssl.com/")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+        let resp = client.request(req).await;
+        assert!(resp.is_ok());
+    }
 }

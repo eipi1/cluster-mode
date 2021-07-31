@@ -1,6 +1,6 @@
 [package]
 name = "cluster-mode"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Md Sarowar Alam <sarowar.cse@gmail.com>"]
 edition = "2018"
 license = "MIT"
@@ -29,11 +29,14 @@ features = ["v4"]
 version = "0.8"
 
 [dependencies.tokio]
-version = "1.3"
+version = "1.9"
 features = ["time", "sync", "test-util", "macros"]
 
 [dependencies.tokio-stream]
 version = "0.1"
+
+[dependencies.native-tls]
+version = "0.2"
 
 [dependencies.futures-util]
 version = "0.3"
@@ -53,6 +56,9 @@ version = "0.2"
 
 [dependencies.hyper]
 version = "0.14"
+
+[dependencies.hyper-tls]
+version = "0.5"
 
 [dependencies.bytes]
 version = "1.0"
