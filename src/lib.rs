@@ -54,6 +54,7 @@ use hyper_tls::HttpsConnector;
 use native_tls::TlsConnector;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 use std::result::Result::Err;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -329,7 +330,7 @@ pub async fn start_cluster<T: DiscoveryService>(
                             // Ans: Only peers, has self id to identify itself
                         }
                         let node = RestClusterNode::new(info.node_id, instance);
-                        if cluster.self_id != node.node_id {
+                        if cluster.self_id != *node.node_id {
                             new_nodes.insert(node.inner.instance_id().clone().unwrap());
                             //todo handle failure
                             debug!("[node: {}] new node found: {:?}", &cluster.self_id, &node);
@@ -436,7 +437,7 @@ async fn handle_control_message_from_raft(
     if let Some(Message::ControlLeaderChanged(node_id)) = msg {
         let mut node = None;
         for discovered_node in discovered.values() {
-            if discovered_node.node_id == node_id {
+            if *discovered_node.node_id == node_id {
                 node = Some(discovered_node);
             }
         }
@@ -484,6 +485,18 @@ pub struct ClusterInfo {
     pub update_interval: u64,
 }
 
+/// A wrapper to avoid confusion between RestClusterNode ID & ServiceInstance ID
+#[derive(Debug, Clone)]
+pub struct RestClusterNodeId(String);
+
+impl Deref for RestClusterNodeId {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// An implementation of [almost_raft::Node]
 ///
 /// `RestClusterNode` uses REST API to communicate with other cluster nodes. User of the crate
@@ -493,7 +506,7 @@ pub struct ClusterInfo {
 /// * /cluster/raft/beat/{leader_node_id:string}/{term:uint32}
 #[derive(Debug, Clone)]
 pub struct RestClusterNode {
-    pub(crate) node_id: String,
+    pub(crate) node_id: RestClusterNodeId,
     pub(crate) inner: ServiceInstance,
 }
 
@@ -504,7 +517,7 @@ impl RestClusterNode {
     /// * instance - [ServiceInstance](rust_cloud_discovery::ServiceInstance) of the node
     pub fn new(node_id: String, instance: ServiceInstance) -> Self {
         Self {
-            node_id,
+            node_id: RestClusterNodeId(node_id),
             inner: instance,
         }
     }
@@ -550,7 +563,7 @@ impl RestClusterNode {
     async fn send_raft_request(&self, uri: String) -> anyhow::Result<()> {
         trace!(
             "sending raft request to node: {}, path: {}",
-            &self.node_id,
+            &*self.node_id,
             &uri
         );
         let request = Request::builder().uri(uri).body(Body::empty())?;
@@ -573,7 +586,7 @@ impl Node for RestClusterNode {
     async fn send_message(&self, msg: Message<Self::NodeType>) {
         debug!(
             "[RestClusterNode: {}] message from raft: {:?}",
-            &self.node_id, &msg
+            &*self.node_id, &msg
         );
         match msg {
             Message::RequestVote { node_id, term } => {
@@ -602,7 +615,7 @@ impl Node for RestClusterNode {
 
 impl PartialEq for RestClusterNode {
     fn eq(&self, other: &Self) -> bool {
-        self.node_id.eq(&other.node_id)
+        self.node_id.eq(&*other.node_id)
     }
 }
 
