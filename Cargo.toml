@@ -13,10 +13,12 @@ categories = ["network-programming"]
 keywords = ["cluster", "distributed-system",]
 
 [dependencies.rust-cloud-discovery]
-version = "0.1"
+#version = "0.1"
+path="../rust-cloud-discovery"
 
 [dependencies.cloud-discovery-kubernetes]
-version = "0.1"
+#version = "0.1"
+path = "../cloud-discovery-kubernetes"
 
 [dependencies.almost-raft]
 version = "0.3"

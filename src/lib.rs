@@ -8,6 +8,7 @@
 //! # use std::sync::Arc;
 //! # use rust_cloud_discovery::DiscoveryClient;
 //! # use cluster_mode::{start_cluster, Cluster, RestClusterNode};
+//! # use cluster_mode::ClusterConfig;
 //! # #[tokio::main(flavor="current_thread")]
 //! # async fn main() {
 //!     let result = KubernetesDiscoverService::init("demo".to_string(), "default".to_string())
@@ -15,7 +16,8 @@
 //!     if let Ok(k8s) = result {
 //!         let cluster = Arc::new(Cluster::default());
 //!         let client = DiscoveryClient::new(k8s);
-//!         tokio::spawn(start_cluster(cluster, client, RestClusterNode::new));
+//!         let config = ClusterConfig::default();
+//!         tokio::spawn(start_cluster(cluster, client, config, RestClusterNode::new, RestClusterNode::get_info));
 //!     }
 //! # }
 //! ```
@@ -38,24 +40,22 @@ macro_rules! log_error {
 
 use almost_raft::election::{raft_election, RaftElectionState};
 use almost_raft::{Message, Node};
-
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures_util::stream::FuturesUnordered;
-use http::{Error, Request};
+use http::Request;
 use hyper::client::{Client, HttpConnector};
 use hyper::Body;
+use hyper_tls::HttpsConnector;
 use log::{debug, error, info, trace};
-
+use native_tls::TlsConnector;
 use rust_cloud_discovery::{DiscoveryClient, DiscoveryService, ServiceInstance};
 use serde::{Deserialize, Serialize};
-
-use hyper_tls::HttpsConnector;
-use native_tls::TlsConnector;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
+use std::num::NonZeroUsize;
 use std::result::Result::Err;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -216,19 +216,47 @@ impl<N> Default for Cluster<N> {
     }
 }
 
+/// Set cluster configurations
+pub struct ClusterConfig {
+    /// connection timeout in milliseconds between cluster nodes
+    pub connection_timeout: u64,
+    /// Interval in milliseconds between attempts to elect new leader node.
+    /// In reality, application will use a randomly chosen value between *election_timeout* and
+    /// *election_timeout\*2*
+    pub election_timeout: u64,
+    /// maximum number of allowed node in a cluster
+    pub max_node: NonZeroUsize,
+    /// minimum number of nodes required to create a cluster
+    pub min_node: NonZeroUsize,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        ClusterConfig {
+            connection_timeout: 10 * 1000,
+            election_timeout: 30 * 1000,
+            max_node: NonZeroUsize::new(20).unwrap(),
+            min_node: NonZeroUsize::new(4).unwrap(),
+        }
+    }
+}
+
 /// Start the cluster. Note that, this function has infinite loop, so should always spawn a new thread.
 /// # Arguments
 /// * cluster: an instance of Cluster
 /// * discovery_service: a discovery service client
 /// * new_node: a function to create a new `Node` instance
-pub async fn start_cluster<T, N>(
+pub async fn start_cluster<T, N, InfoFut>(
     cluster: Arc<Cluster<N>>,
     discovery_service: DiscoveryClient<T>,
+    config: ClusterConfig,
     new_node: fn(String, ServiceInstance) -> N,
+    get_info_fut: impl Fn(ServiceInstance) -> InfoFut,
 ) where
     T: DiscoveryService,
     N: Node + Clone + Eq + Hash + Debug + Send + Sync + 'static,
     <N as almost_raft::Node>::NodeType: std::marker::Send,
+    InfoFut: Future<Output = Result<(ClusterInfo, ServiceInstance), anyhow::Error>>,
 {
     info!("[node: {}] starting cluster...", &cluster.self_id);
     let raft_tx_timeout = 15;
@@ -237,13 +265,15 @@ pub async fn start_cluster<T, N>(
 
     let (raft, raft_tx) = RaftElectionState::init(
         cluster.self_id.clone(),
-        30 * 1000,
-        10 * 1000,
+        config.election_timeout,
+        config.connection_timeout,
         500,
         vec![],
         tx.clone(),
-        20,
-        3,
+        config.max_node.get(),
+        // almost_raft doesn't count itself in number of peers/nodes,
+        // so should subtract one.
+        config.min_node.get() - 1,
     );
 
     {
@@ -255,8 +285,6 @@ pub async fn start_cluster<T, N>(
     tokio::spawn(raft_election(raft));
 
     let mut remaining_update_interval = cluster.update_interval;
-
-    let client = build_client();
 
     //todo reconfirm if map is needed or only set of node id is enough
     //
@@ -310,56 +338,49 @@ pub async fn start_cluster<T, N>(
                 //must have some identifier
                 continue;
             }
-            if discovered.contains_key(&id) //no need to get info if already discovered
-                || instance.uri().is_none()
-            {
+            //no need to get info if already discovered
+            if discovered.contains_key(&id) {
                 current_instances.insert(id);
                 continue;
             }
             current_instances.insert(id);
 
-            let request = Request::builder()
-                .uri(format!("{}{}", instance.uri().clone().unwrap(), PATH_INFO))
-                .body(Body::empty());
             // use FuturesUnordered for parallel requests
-            requests.push(send_request(&client, request, instance));
+            requests.push(get_info_fut(instance));
         }
 
         let mut new_nodes = HashSet::new();
         while let Some(result) = requests.next().await {
             match result {
-                Ok((resp, instance)) => {
-                    let info = serde_json::from_slice::<ClusterInfo>(resp.as_ref());
+                Ok((info, instance)) => {
                     trace!(
                         "[node: {}] cluster info {:?} from {:?}",
                         &cluster.self_id,
                         &info,
                         &instance
                     );
-                    if let Ok(info) = info {
-                        if info.node_id == cluster.self_id {
-                            {
-                                let mut guard = cluster.self_.write().await;
-                                guard.replace(instance.clone());
-                            }
-                            //is it need to add self to raft? or only peers.
-                            // Ans: Only peers, has self id to identify itself
+                    if info.node_id == cluster.self_id {
+                        {
+                            let mut guard = cluster.self_.write().await;
+                            guard.replace(instance.clone());
                         }
-                        let node = new_node(info.node_id, instance);
-                        if cluster.self_id != *node.node_id() {
-                            new_nodes.insert(node.service_instance_id().clone());
-                            //todo handle failure
-                            debug!("[node: {}] new node found: {:?}", &cluster.self_id, &node);
-                            let result = raft_tx
-                                .send_timeout(
-                                    Message::ControlAddNode(node.clone()),
-                                    Duration::from_millis(raft_tx_timeout),
-                                )
-                                .await;
-                            log_error!(result);
-                        }
-                        discovered.insert(node.service_instance_id().clone(), node);
+                        //is it need to add self to raft? or only peers.
+                        // Ans: Only peers, has self id to identify itself
                     }
+                    let node = new_node(info.node_id, instance);
+                    if cluster.self_id != *node.node_id() {
+                        new_nodes.insert(node.service_instance_id().clone());
+                        //todo handle failure
+                        debug!("[node: {}] new node found: {:?}", &cluster.self_id, &node);
+                        let result = raft_tx
+                            .send_timeout(
+                                Message::ControlAddNode(node.clone()),
+                                Duration::from_millis(raft_tx_timeout),
+                            )
+                            .await;
+                        log_error!(result);
+                    }
+                    discovered.insert(node.service_instance_id().clone(), node);
                 }
                 Err(err) => {
                     error!(
@@ -427,17 +448,6 @@ fn build_client() -> Client<HttpsConnector<HttpConnector>> {
     http_connector.enforce_http(false);
     let connector = HttpsConnector::from((http_connector, tls.into()));
     Client::builder().build(connector)
-}
-
-async fn send_request(
-    client: &Client<HttpsConnector<HttpConnector>>,
-    request: Result<Request<Body>, Error>,
-    instance: ServiceInstance,
-) -> anyhow::Result<(Bytes, ServiceInstance)> {
-    let request = request?;
-    let resp = client.request(request).await?;
-    let resp = hyper::body::to_bytes(resp).await?;
-    Ok((resp, instance))
 }
 
 #[inline]
@@ -635,6 +645,23 @@ impl Node for RestClusterNode {
     }
 }
 
+impl RestClusterNode {
+    #[allow(dead_code)]
+    /// get [ClusterInfo]
+    pub async fn get_info(
+        instance: ServiceInstance,
+    ) -> anyhow::Result<(ClusterInfo, ServiceInstance)> {
+        let request = Request::builder()
+            .uri(format!("{}{}", instance.uri().clone().unwrap(), PATH_INFO))
+            .body(Body::empty());
+        let request = request?;
+        let resp = build_client().request(request).await?;
+        let resp = hyper::body::to_bytes(resp).await?;
+        let info = serde_json::from_slice::<ClusterInfo>(resp.as_ref())?;
+        Ok((info, instance))
+    }
+}
+
 impl PartialEq for RestClusterNode {
     fn eq(&self, other: &Self) -> bool {
         self.node_id.eq(&*other.node_id)
@@ -672,10 +699,10 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::{build_client, start_cluster, Cluster, RestClusterNode};
+    use crate::{build_client, start_cluster, Cluster, ClusterConfig, RestClusterNode};
     use cloud_discovery_kubernetes::KubernetesDiscoverService;
     use hyper::{Body, Request};
-    use rust_cloud_discovery::{DiscoveryClient, ServiceInstance};
+    use rust_cloud_discovery::DiscoveryClient;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -685,12 +712,15 @@ mod test {
         if let Ok(k8s) = result {
             let cluster = Arc::new(Cluster::<RestClusterNode>::default());
             let client = DiscoveryClient::new(k8s);
-            tokio::spawn(start_cluster(cluster, client, create_new_node));
+            let config = ClusterConfig::default();
+            tokio::spawn(start_cluster(
+                cluster,
+                client,
+                config,
+                RestClusterNode::new,
+                RestClusterNode::get_info,
+            ));
         }
-    }
-
-    fn create_new_node(node_id: String, instance: ServiceInstance) -> RestClusterNode {
-        RestClusterNode::new(node_id, instance)
     }
 
     #[tokio::test]
