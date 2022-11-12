@@ -8,6 +8,7 @@
 //! # use std::sync::Arc;
 //! # use rust_cloud_discovery::DiscoveryClient;
 //! # use cluster_mode::{start_cluster, Cluster};
+//! # use cluster_mode::ClusterConfig;
 //! # #[tokio::main(flavor="current_thread")]
 //! # async fn main() {
 //!     let result = KubernetesDiscoverService::init("demo".to_string(), "default".to_string())
@@ -15,7 +16,8 @@
 //!     if let Ok(k8s) = result {
 //!         let cluster = Arc::new(Cluster::default());
 //!         let client = DiscoveryClient::new(k8s);
-//!         tokio::spawn(start_cluster(cluster, client));
+//!         let config = ClusterConfig::default();
+//!         tokio::spawn(start_cluster(cluster, client, config));
 //!     }
 //! # }
 //! ```
@@ -54,6 +56,7 @@ use hyper_tls::HttpsConnector;
 use native_tls::TlsConnector;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::result::Result::Err;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -78,8 +81,6 @@ pub struct Cluster {
     self_id: String,
     /// Mode of the cluster
     mode: RwLock<InstanceMode>,
-    /// Interval between discovery service call, in milliseconds
-    update_interval: u64,
     /// [ServiceInstance] representing current cluster node
     self_: RwLock<Option<ServiceInstance>>,
     /// List of primaries
@@ -96,9 +97,8 @@ impl Cluster {
     /// Initialize `Cluster`
     /// # Arguments
     /// * update_interval - milliseconds, Interval between discovery service call
-    pub fn new(update_interval: u64) -> Self {
+    pub fn new() -> Self {
         Cluster {
-            update_interval,
             ..Default::default()
         }
     }
@@ -206,7 +206,6 @@ impl Default for Cluster {
         Cluster {
             self_id: uuid::Uuid::new_v4().to_string(),
             mode: RwLock::from(InstanceMode::Inactive),
-            update_interval: 10 * 1000,
             self_: Default::default(),
             primaries: Default::default(),
             secondaries: Default::default(),
@@ -216,10 +215,39 @@ impl Default for Cluster {
     }
 }
 
+/// Set cluster configurations
+pub struct ClusterConfig {
+    /// connection timeout in milliseconds between cluster nodes
+    pub connection_timeout: u64,
+    /// Approximate interval in milliseconds between attempts to elect new leader node.
+    /// Application will use a randomly chosen value between *election_timeout* and
+    /// *election_timeout\*2*
+    pub election_timeout: u64,
+    /// Interval between discovery service call, in milliseconds
+    update_interval: u64,
+    /// maximum number of allowed node in a cluster
+    pub max_node: NonZeroUsize,
+    /// minimum number of nodes required to create a cluster
+    pub min_node: NonZeroUsize,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        ClusterConfig {
+            connection_timeout: 10 * 1000,
+            election_timeout: 30 * 1000,
+            update_interval: 10 * 1000,
+            max_node: NonZeroUsize::new(20).unwrap(),
+            min_node: NonZeroUsize::new(4).unwrap(),
+        }
+    }
+}
+
 /// Start the cluster. Note that, this function has infinite loop, so should always spawn a new thread.
 pub async fn start_cluster<T: DiscoveryService>(
     cluster: Arc<Cluster>,
     discovery_service: DiscoveryClient<T>,
+    config: ClusterConfig,
 ) {
     info!("[node: {}] starting cluster...", &cluster.self_id);
     let raft_tx_timeout = 15;
@@ -228,13 +256,15 @@ pub async fn start_cluster<T: DiscoveryService>(
 
     let (raft, raft_tx) = RaftElectionState::init(
         cluster.self_id.clone(),
-        30 * 1000,
-        10 * 1000,
+        config.election_timeout,
+        config.connection_timeout,
         500,
         vec![],
         tx.clone(),
-        20,
-        3,
+        config.max_node.get(),
+        // almost_raft doesn't count itself in number of peers/nodes,
+        // so should subtract one.
+        config.min_node.get() - 1,
     );
 
     {
@@ -245,7 +275,7 @@ pub async fn start_cluster<T: DiscoveryService>(
     info!("[node: {}] spawning raft election...", &cluster.self_id);
     tokio::spawn(raft_election(raft));
 
-    let mut remaining_update_interval = cluster.update_interval;
+    let mut remaining_update_interval = config.update_interval;
 
     let client = build_client();
 
@@ -276,7 +306,7 @@ pub async fn start_cluster<T: DiscoveryService>(
             );
             continue;
         }
-        remaining_update_interval = cluster.update_interval;
+        remaining_update_interval = config.update_interval;
 
         trace!("[node: {}] calling discovery service.", &cluster.self_id);
         let instances = if let Ok(instance) = discovery_service.get_instances().await {
@@ -291,13 +321,12 @@ pub async fn start_cluster<T: DiscoveryService>(
         let mut requests = FuturesUnordered::new();
         let mut current_instances = HashSet::new();
         for instance in instances {
-            let id;
-            if instance.instance_id().is_some() {
-                id = instance.instance_id().clone().unwrap();
+            let id = if instance.instance_id().is_some() {
+                instance.instance_id().clone().unwrap()
             } else {
                 //must have some identifier
                 continue;
-            }
+            };
             if discovered.contains_key(&id) //no need to get info if already discovered
                 || instance.uri().is_none()
             {
@@ -474,7 +503,6 @@ pub async fn get_cluster_info(cluster: Arc<Cluster>) -> ClusterInfo {
     ClusterInfo {
         instance: node,
         node_id: cluster.self_id.clone(),
-        update_interval: cluster.update_interval,
     }
 }
 
@@ -485,8 +513,6 @@ pub struct ClusterInfo {
     pub node_id: String,
     /// [ServiceInstance] representing current node
     pub instance: Option<ServiceInstance>,
-    /// Interval between discovery service call, in milliseconds
-    pub update_interval: u64,
 }
 
 /// An implementation of [almost_raft::Node]
@@ -642,7 +668,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::{build_client, start_cluster, Cluster};
+    use crate::{build_client, start_cluster, Cluster, ClusterConfig};
     use cloud_discovery_kubernetes::KubernetesDiscoverService;
     use hyper::{Body, Request};
     use rust_cloud_discovery::DiscoveryClient;
@@ -655,7 +681,8 @@ mod test {
         if let Ok(k8s) = result {
             let cluster = Arc::new(Cluster::default());
             let client = DiscoveryClient::new(k8s);
-            tokio::spawn(start_cluster(cluster, client));
+            let config = ClusterConfig::default();
+            tokio::spawn(start_cluster(cluster, client, config));
         }
     }
 

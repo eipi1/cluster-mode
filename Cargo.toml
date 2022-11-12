@@ -1,6 +1,6 @@
 [package]
 name = "cluster-mode"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Md Sarowar Alam <sarowar.cse@gmail.com>"]
 edition = "2018"
 license = "MIT"
@@ -10,7 +10,7 @@ description = """
 Some help to create and manage cluster in Rust
 """
 categories = ["network-programming"]
-keywords = ["cluster", "distributed-system",]
+keywords = ["cluster", "distributed-system", "Kubernetes"]
 
 [dependencies.rust-cloud-discovery]
 version = "0.2"
@@ -19,10 +19,10 @@ version = "0.2"
 version = "0.2"
 
 [dependencies.almost-raft]
-version = "0.2"
+version = "0.3"
 
 [dependencies.uuid]
-version = "0.8"
+version = "1.2"
 features = ["v4"]
 
 [dependencies.rand]
@@ -73,5 +73,5 @@ version = "1.0"
 version = "1.4"
 
 [dev-dependencies.tracing-subscriber]
-version = "0.2"
+version = "0.3.16"
 features = ["fmt"]
