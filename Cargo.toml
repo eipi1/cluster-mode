@@ -13,16 +13,16 @@ categories = ["network-programming"]
 keywords = ["cluster", "distributed-system",]
 
 [dependencies.rust-cloud-discovery]
-version = "0.1"
-
-[dependencies.cloud-discovery-kubernetes]
-version = "0.1"
-
-[dependencies.almost-raft]
 version = "0.2"
 
+[dependencies.cloud-discovery-kubernetes]
+version = "0.2"
+
+[dependencies.almost-raft]
+version = "0.3"
+
 [dependencies.uuid]
-version = "0.8"
+version = "1.2"
 features = ["v4"]
 
 [dependencies.rand]
@@ -73,5 +73,5 @@ version = "1.0"
 version = "1.4"
 
 [dev-dependencies.tracing-subscriber]
-version = "0.2"
+version = "0.3.16"
 features = ["fmt"]
