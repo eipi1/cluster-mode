@@ -224,7 +224,7 @@ pub struct ClusterConfig {
     /// *election_timeout\*2*
     pub election_timeout: u64,
     /// Interval between discovery service call, in milliseconds
-    update_interval: u64,
+    pub update_interval: u64,
     /// maximum number of allowed node in a cluster
     pub max_node: NonZeroUsize,
     /// minimum number of nodes required to create a cluster
