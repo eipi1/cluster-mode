@@ -194,6 +194,11 @@ impl Cluster {
             log_error!(result);
         }
     }
+
+    /// get the service instance of this cluster node
+    pub async fn get_service_instance(&self) -> Option<ServiceInstance> {
+        self.self_.read().await.clone()
+    }
 }
 
 impl Default for Cluster {
