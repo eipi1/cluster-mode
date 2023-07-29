@@ -80,8 +80,6 @@ pub struct Cluster<N> {
     self_id: String,
     /// Mode of the cluster
     mode: RwLock<InstanceMode>,
-    /// Interval between discovery service call, in milliseconds
-    update_interval: u64,
     /// [ServiceInstance] representing current cluster node
     self_: RwLock<Option<ServiceInstance>>,
     /// List of primaries
@@ -101,9 +99,8 @@ where
     /// Initialize `Cluster`
     /// # Arguments
     /// * update_interval - milliseconds, Interval between discovery service call
-    pub fn new(update_interval: u64) -> Self {
+    pub fn new() -> Self {
         Cluster {
-            update_interval,
             ..Default::default()
         }
     }
@@ -199,6 +196,11 @@ where
             log_error!(result);
         }
     }
+
+    /// get the service instance of this cluster node
+    pub async fn get_service_instance(&self) -> Option<ServiceInstance> {
+        self.self_.read().await.clone()
+    }
 }
 
 impl<N> Default for Cluster<N> {
@@ -206,7 +208,6 @@ impl<N> Default for Cluster<N> {
         Cluster {
             self_id: uuid::Uuid::new_v4().to_string(),
             mode: RwLock::from(InstanceMode::Inactive),
-            update_interval: 10 * 1000,
             self_: Default::default(),
             primaries: Default::default(),
             secondaries: Default::default(),
@@ -284,7 +285,7 @@ pub async fn start_cluster<T, N, InfoFut>(
     info!("[node: {}] spawning raft election...", &cluster.self_id);
     tokio::spawn(raft_election(raft));
 
-    let mut remaining_update_interval = cluster.update_interval;
+    let mut remaining_update_interval = config.update_interval;
 
     //todo reconfirm if map is needed or only set of node id is enough
     //
@@ -316,7 +317,7 @@ pub async fn start_cluster<T, N, InfoFut>(
             );
             continue;
         }
-        remaining_update_interval = cluster.update_interval;
+        remaining_update_interval = config.update_interval;
 
         trace!("[node: {}] calling discovery service.", &cluster.self_id);
         let instances = if let Ok(instance) = discovery_service.get_instances().await {
@@ -331,13 +332,12 @@ pub async fn start_cluster<T, N, InfoFut>(
         let mut requests = FuturesUnordered::new();
         let mut current_instances = HashSet::new();
         for instance in instances {
-            let id;
-            if instance.instance_id().is_some() {
-                id = instance.instance_id().clone().unwrap();
+            let id = if instance.instance_id().is_some() {
+                instance.instance_id().clone().unwrap()
             } else {
                 //must have some identifier
                 continue;
-            }
+            };
             //no need to get info if already discovered
             if discovered.contains_key(&id) {
                 current_instances.insert(id);
@@ -498,7 +498,6 @@ pub async fn get_cluster_info<N: Node>(cluster: Arc<Cluster<N>>) -> ClusterInfo 
     ClusterInfo {
         instance: node,
         node_id: cluster.self_id.clone(),
-        update_interval: cluster.update_interval,
     }
 }
 
@@ -509,8 +508,6 @@ pub struct ClusterInfo {
     pub node_id: String,
     /// [ServiceInstance] representing current node
     pub instance: Option<ServiceInstance>,
-    /// Interval between discovery service call, in milliseconds
-    pub update_interval: u64,
 }
 
 /// A wrapper to avoid confusion between RestClusterNode ID & ServiceInstance ID
