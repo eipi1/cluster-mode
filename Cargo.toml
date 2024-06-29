@@ -19,7 +19,8 @@ version = "0.2"
 version = "0.2"
 
 [dependencies.almost-raft]
-version = "0.3"
+#version = "0.3"
+path = "../almost-raft"
 
 [dependencies.uuid]
 version = "1.2"
@@ -30,7 +31,7 @@ version = "0.8"
 
 [dependencies.tokio]
 version = "1.9"
-features = ["time", "sync", "test-util", "macros"]
+features = ["time", "sync", "test-util", "macros", "rt-multi-thread"]
 
 [dependencies.tokio-stream]
 version = "0.1"
@@ -72,6 +73,9 @@ version = "1.0"
 [dev-dependencies.lazy_static]
 version = "1.4"
 
-[dev-dependencies.tracing-subscriber]
-version = "0.3.16"
-features = ["fmt"]
+#[dev-dependencies.tracing-subscriber]
+#version = "0.3.16"
+#features = ["fmt"]
+
+[dev-dependencies.env_logger]
+version = "0.10"

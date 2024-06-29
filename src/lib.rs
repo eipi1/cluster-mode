@@ -39,7 +39,7 @@ macro_rules! log_error {
 }
 
 use almost_raft::election::{raft_election, RaftElectionState};
-use almost_raft::{Message, Node};
+use almost_raft::{ClusterNode, Message};
 use async_trait::async_trait;
 use futures_util::stream::FuturesUnordered;
 use http::Request;
@@ -54,8 +54,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
-use std::ops::Deref;
 use std::num::NonZeroUsize;
+use std::ops::Deref;
 use std::result::Result::Err;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -75,7 +75,7 @@ pub enum InstanceMode {
 
 #[allow(dead_code)]
 /// Describes a cluster, including operating mode, primaries & secondaries
-pub struct Cluster<N> {
+pub struct Cluster<N: ClusterNode> {
     /// Identifier of current node, UUID String
     self_id: String,
     /// Mode of the cluster
@@ -94,7 +94,7 @@ pub struct Cluster<N> {
 
 impl<N> Cluster<N>
 where
-    N: Clone + Debug,
+    N: Clone + Debug + ClusterNode,
 {
     /// Initialize `Cluster`
     /// # Arguments
@@ -105,9 +105,13 @@ where
         }
     }
 
+    pub fn get_id(&self) -> &String {
+        &self.self_id
+    }
+
     #[doc(hidden)]
     /// For testing purpose
-    pub fn _new(mode: InstanceMode, secondaries: HashSet<N>) -> Self {
+    pub(crate) fn _new(mode: InstanceMode, secondaries: HashSet<N>) -> Self {
         Cluster {
             mode: RwLock::new(mode),
             secondaries: RwLock::new(Arc::new(secondaries)),
@@ -164,7 +168,7 @@ where
     pub async fn accept_raft_request_vote(&self, requester_node_id: String, term: usize) {
         self.send_message_to_raft(Message::RequestVote {
             term,
-            node_id: requester_node_id,
+            requester_node_id,
         })
         .await;
     }
@@ -203,7 +207,7 @@ where
     }
 }
 
-impl<N> Default for Cluster<N> {
+impl<N: ClusterNode> Default for Cluster<N> {
     fn default() -> Self {
         Cluster {
             self_id: uuid::Uuid::new_v4().to_string(),
@@ -217,14 +221,17 @@ impl<N> Default for Cluster<N> {
     }
 }
 
+#[derive(Debug, Clone)]
 /// Set cluster configurations
 pub struct ClusterConfig {
     /// connection timeout in milliseconds between cluster nodes
     pub connection_timeout: u64,
-    /// Interval in milliseconds between attempts to elect new leader node.
-    /// In reality, application will use a randomly chosen value between *election_timeout* and
+    /// Approximate interval in milliseconds between attempts to elect new leader node.
+    /// Application will use a randomly chosen value between *election_timeout* and
     /// *election_timeout\*2*
     pub election_timeout: u64,
+    /// Interval between discovery service call, in milliseconds
+    pub update_interval: u64,
     /// maximum number of allowed node in a cluster
     pub max_node: NonZeroUsize,
     /// minimum number of nodes required to create a cluster
@@ -236,6 +243,7 @@ impl Default for ClusterConfig {
         ClusterConfig {
             connection_timeout: 10 * 1000,
             election_timeout: 30 * 1000,
+            update_interval: 10 * 1000,
             max_node: NonZeroUsize::new(20).unwrap(),
             min_node: NonZeroUsize::new(4).unwrap(),
         }
@@ -247,6 +255,7 @@ impl Default for ClusterConfig {
 /// * cluster: an instance of Cluster
 /// * discovery_service: a discovery service client
 /// * new_node: a function to create a new `Node` instance
+#[allow(deprecated)]
 pub async fn start_cluster<T, N, InfoFut>(
     cluster: Arc<Cluster<N>>,
     discovery_service: DiscoveryClient<T>,
@@ -255,8 +264,8 @@ pub async fn start_cluster<T, N, InfoFut>(
     get_info_fut: impl Fn(ServiceInstance) -> InfoFut,
 ) where
     T: DiscoveryService,
-    N: Node + Clone + Eq + Hash + Debug + Send + Sync + 'static,
-    <N as almost_raft::Node>::NodeType: std::marker::Send,
+    N: ClusterNode + Clone + Eq + Hash + Debug + Send + Sync + 'static,
+    <N as almost_raft::ClusterNode>::NodeType: std::marker::Send,
     InfoFut: Future<Output = Result<(ClusterInfo, ServiceInstance), anyhow::Error>>,
 {
     info!("[node: {}] starting cluster...", &cluster.self_id);
@@ -295,10 +304,9 @@ pub async fn start_cluster<T, N, InfoFut>(
     let mut discovered: HashMap<String, N> = HashMap::new();
 
     loop {
-        trace!(
+        debug!(
             "[node: {}] update timeout: {}",
-            &cluster.self_id,
-            &remaining_update_interval
+            &cluster.self_id, &remaining_update_interval
         );
         //get message from raft or time to check discovery service
         let start_time = Instant::now();
@@ -319,14 +327,23 @@ pub async fn start_cluster<T, N, InfoFut>(
         }
         remaining_update_interval = config.update_interval;
 
-        trace!("[node: {}] calling discovery service.", &cluster.self_id);
+        debug!("[node: {}] calling discovery service.", &cluster.self_id);
         let instances = if let Ok(instance) = discovery_service.get_instances().await {
             instance
         } else {
             vec![]
         };
 
-        debug!("discovered instances: {:?}", instances);
+        debug!(
+            "[node: {}] discovered {} instances",
+            &cluster.self_id,
+            instances.len()
+        );
+        trace!(
+            "[node: {}] discovered instances: {:?}",
+            &cluster.self_id,
+            &instances
+        );
 
         // collect cluster info
         let mut requests = FuturesUnordered::new();
@@ -338,12 +355,13 @@ pub async fn start_cluster<T, N, InfoFut>(
                 //must have some identifier
                 continue;
             };
+
+            let already_discovered = discovered.contains_key(&id);
+            current_instances.insert(id);
             //no need to get info if already discovered
-            if discovered.contains_key(&id) {
-                current_instances.insert(id);
+            if already_discovered {
                 continue;
             }
-            current_instances.insert(id);
 
             // use FuturesUnordered for parallel requests
             requests.push(get_info_fut(instance));
@@ -365,7 +383,7 @@ pub async fn start_cluster<T, N, InfoFut>(
                             guard.replace(instance.clone());
                         }
                         //is it need to add self to raft? or only peers.
-                        // Ans: Only peers, has self id to identify itself
+                        // Ans: Only peers, use self id to identify itself
                     }
                     let node = new_node(info.node_id, instance);
                     if cluster.self_id != *node.node_id() {
@@ -450,13 +468,24 @@ fn build_client() -> Client<HttpsConnector<HttpConnector>> {
     Client::builder().build(connector)
 }
 
+// async fn send_request(
+//     client: &Client<HttpsConnector<HttpConnector>>,
+//     request: Result<Request<Body>, Error>,
+//     instance: ServiceInstance,
+// ) -> anyhow::Result<(Bytes, ServiceInstance)> {
+//     let request = request?;
+//     let resp = client.request(request).await?;
+//     let resp = hyper::body::to_bytes(resp).await?;
+//     Ok((resp, instance))
+// }
+
 #[inline]
 async fn handle_control_message_from_raft<N>(
     cluster: &Arc<Cluster<N>>,
     discovered: &HashMap<String, N>,
     msg: Option<Message<N>>,
 ) where
-    N: Node + Debug + Clone + Eq + Hash,
+    N: ClusterNode + Debug + Clone + Eq + Hash,
 {
     info!(
         "[node: {}] control message from raft: {:?}",
@@ -490,7 +519,7 @@ async fn handle_control_message_from_raft<N>(
 }
 
 /// Returns selective information on current cluster
-pub async fn get_cluster_info<N: Node>(cluster: Arc<Cluster<N>>) -> ClusterInfo {
+pub async fn get_cluster_info<N: ClusterNode>(cluster: Arc<Cluster<N>>) -> ClusterInfo {
     let node = {
         let guard = cluster.self_.read().await;
         guard.as_ref().map(|x| x.to_owned())
@@ -605,7 +634,7 @@ impl RestClusterNode {
 }
 
 #[async_trait]
-impl Node for RestClusterNode {
+impl ClusterNode for RestClusterNode {
     type NodeType = RestClusterNode;
 
     async fn send_message(&self, msg: Message<Self::NodeType>) {
@@ -614,8 +643,11 @@ impl Node for RestClusterNode {
             &*self.node_id, &msg
         );
         match msg {
-            Message::RequestVote { node_id, term } => {
-                let result = self.send_request_vote(node_id, term).await;
+            Message::RequestVote {
+                requester_node_id,
+                term,
+            } => {
+                let result = self.send_request_vote(requester_node_id, term).await;
                 log_error!(result);
             }
             Message::RequestVoteResponse { vote, term } => {

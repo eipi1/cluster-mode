@@ -1,4 +1,7 @@
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 use async_trait::async_trait;
+use log::trace;
 use rust_cloud_discovery::{DiscoveryService, ServiceInstance};
 use std::error::Error;
 use std::sync::Arc;
@@ -6,20 +9,30 @@ use tokio::sync::RwLock;
 
 // mod node;
 
-pub struct TestDiscoveryService {
+#[derive(Debug, Clone)]
+pub struct SimpleVecDiscoveryService {
     instances: Arc<RwLock<Vec<ServiceInstance>>>,
 }
 
-impl TestDiscoveryService {
-    pub fn new(instances: Arc<RwLock<Vec<ServiceInstance>>>) -> Self {
-        Self{
-            instances
+impl SimpleVecDiscoveryService {
+    pub fn new() -> Self {
+        Self {
+            instances: Arc::new(Default::default()),
         }
+    }
+
+    pub async fn add_node(&mut self, instance: ServiceInstance) {
+        self.instances.write().await.push(instance);
+        trace!("adding new node");
+    }
+
+    pub async fn remove_node(&mut self, index: usize) {
+        self.instances.write().await.remove(index);
     }
 }
 
 #[async_trait]
-impl DiscoveryService for TestDiscoveryService {
+impl DiscoveryService for SimpleVecDiscoveryService {
     async fn discover_instances(&self) -> Result<Vec<ServiceInstance>, Box<dyn Error>> {
         // let mut rx = self.rx.write().await;
         // let result = tokio::time::timeout(
@@ -28,6 +41,8 @@ impl DiscoveryService for TestDiscoveryService {
         // ).await;
         // if
         let guard = self.instances.read().await;
-        Ok(guard.to_vec())
+        let instances = guard.to_vec();
+        trace!("discovered {} nodes", instances.len());
+        Ok(instances)
     }
 }
