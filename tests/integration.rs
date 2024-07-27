@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
-use crate::common::{MpscDiscoveryService, MpscNode};
+use crate::common::{MpscDiscoveryService, MpscNode, MpscNodeId};
 use almost_raft::Message;
 use cluster_mode::{start_cluster, Cluster, ClusterConfig, ClusterInfo, ClusterInstanceId};
 use lazy_static::lazy_static;
@@ -28,7 +28,7 @@ type MpscNodeTx = Sender<Message<MpscNode>>;
 
 lazy_static! {
     // static ref INSTANCES: Arc<RwLock<Vec<ServiceInstance>>> = Arc::new(RwLock::new(Vec::new()));
-    static ref NODE_ID_NODE_MAP: StdRwLock<HashMap<ClusterInstanceId, (MpscNodeRx, MpscNodeTx)>> =
+    static ref NODE_ID_NODE_MAP: StdRwLock<HashMap<MpscNodeId, (MpscNodeRx, MpscNodeTx)>> =
         StdRwLock::new(HashMap::new());
     static ref SERVICE_INSTANCE_TO_CLUSTER: StdRwLock<HashMap<String, Arc<Cluster<MpscNode>>>> =
         StdRwLock::new(HashMap::new());
@@ -113,7 +113,7 @@ async fn create_cluster_instance(
     ));
 
     let cluster_id = cluster_instance.get_id();
-    let (node, tx, rx) = MpscNode::create_new(cluster_id.as_str().to_string());
+    let (node, tx, rx) = MpscNode::create_new(cluster_id.to_string());
     // let node_id = node.node_id.deref().clone();
     NODE_ID_NODE_MAP
         .write()
@@ -143,14 +143,14 @@ async fn start_message_handler(
     loop {
         let result = tokio::time::timeout(Duration::from_millis(50), rx.write().await.recv()).await;
         if let Ok(Some(msg)) = result {
-            trace!("[{}] got message - {:?}", cluster.get_id().as_str(), &msg);
+            trace!("[{}] got message - {:?}", cluster.get_id().to_string(), &msg);
             match msg {
                 Message::RequestVote {
                     requester_node_id,
                     term,
                 } => {
                     cluster
-                        .accept_raft_request_vote(requester_node_id.clone(), term)
+                        .accept_raft_request_vote(requester_node_id.to_string(), term)
                         .await;
                 }
                 Message::RequestVoteResponse { vote, term } => {
@@ -161,7 +161,7 @@ async fn start_message_handler(
                     term,
                 } => {
                     cluster
-                        .accept_raft_heartbeat(leader_node_id.clone(), term)
+                        .accept_raft_heartbeat(leader_node_id.to_string(), term)
                         .await;
                 }
                 _ => {
@@ -211,7 +211,7 @@ pub async fn get_info(instance: ServiceInstance) -> anyhow::Result<(ClusterInfo,
         .unwrap()
         .clone();
     let info = ClusterInfo {
-        node_id: cluster.get_id().clone(),
+        node_id: cluster.get_id().to_string(),
         instance: Some(instance.clone()),
     };
     Ok((info, instance))
