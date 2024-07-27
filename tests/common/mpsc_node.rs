@@ -52,6 +52,17 @@ impl MpscNode {
         };
         (node, tx, rx)
     }
+    pub fn new_node_from(
+        node_id: String,
+        tx: Sender<Message<MpscNode>>,
+        rx: MpscNodeRx,
+    ) -> MpscNode {
+        MpscNode {
+            node_id: NodeId(node_id),
+            rx,
+            tx,
+        }
+    }
 }
 
 #[async_trait]

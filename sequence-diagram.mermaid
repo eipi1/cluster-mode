@@ -1,0 +1,67 @@
+sequenceDiagram
+%%    Kubernetes->>DiscoveryService: start
+    participant App
+    participant Protocol
+    participant cluster-mode
+%%    participant Node as ClusterNode
+%%    participant Protocol
+    App-)cluster-mode:start_cluster
+    activate cluster-mode
+    participant Node as ClusterNode
+%%    cluster-mode->>Node:init
+    box rgb(51,56,52)
+        participant Protocol
+        participant App
+    end
+    participant discovery-service
+    participant almost-raft
+    cluster-mode-)almost-raft:start_raft(..)
+%%    activate almost-raft
+    loop Every 10 seconds
+        cluster-mode->>discovery-service:get_instances()
+        loop for each instance in instances
+            rect rgb(51,56,58)
+                Note over Protocol, cluster-mode: Inter-node(HTTP/TCP/MPSC) request
+                cluster-mode->>Protocol:get_info(instance)
+                Protocol->>cluster-mode: forward get_info()
+                cluster-mode->>Protocol:return ClusterInfo
+                Protocol->>cluster-mode:forward ClusterInfo
+            end
+            cluster-mode->>cluster-mode:create_new_node(ClusterInfo.node_id,instance)
+            opt is it a new node?
+                cluster-mode->>almost-raft:AddNode(ClusterNode)
+                activate almost-raft
+                almost-raft->>almost-raft:increment node count
+                deactivate almost-raft
+            end
+        end
+    end
+    deactivate cluster-mode
+    opt node count > min_node
+        create participant raft-election
+        almost-raft->>raft-election:start_election
+    end
+    box rgb(51,56,52)
+        participant almost-raft
+        participant raft-election
+    end
+    activate raft-election
+    rect rgb(51,56,58)
+        Note over cluster-mode,raft-election: Request to vote for Raft Election
+        raft-election->>Node:RequestVote
+        Node->>cluster-mode:forward RequestVote
+        cluster-mode->>raft-election:forward RequestVote
+    end
+    rect rgb(51,56,45)
+        Note over cluster-mode,raft-election: Return vote to participate in the election
+        raft-election->>Node:RequestVoteResponse
+        Node->>cluster-mode:forward RequestVoteResponse
+        cluster-mode->>raft-election:forward RequestVoteResponse
+    end
+    raft-election-->>raft-election:elect_leader
+    loop every heartbeat_interval
+        raft-election-)Node:Heartbeat
+
+    end
+    deactivate raft-election
+    destroy raft_election

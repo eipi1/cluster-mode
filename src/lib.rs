@@ -51,7 +51,7 @@ use native_tls::TlsConnector;
 use rust_cloud_discovery::{DiscoveryClient, DiscoveryService, ServiceInstance};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
@@ -73,11 +73,41 @@ pub enum InstanceMode {
     Secondary,
 }
 
+/// Cluster ID, a String wrapper to avoid confusion between all other Ids
+#[derive(PartialEq, Eq, Hash, Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterInstanceId(String);
+
+impl ClusterInstanceId {
+    /// take out the ClusterInstanceId as String. Is there a better way to do this?
+    pub fn unpack(self) -> String {
+        self.0
+    }
+
+    /// Get the actual string slice
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for ClusterInstanceId {
+    fn from(value: String) -> Self {
+        ClusterInstanceId(value)
+    }
+}
+
+// impl Deref for ClusterInstanceId {
+//     type Target = String;
+//
+//     fn deref(&self) -> &Self::Target {
+//         &self.0
+//     }
+// }
+
 #[allow(dead_code)]
 /// Describes a cluster, including operating mode, primaries & secondaries
 pub struct Cluster<N: ClusterNode> {
     /// Identifier of current node, UUID String
-    self_id: String,
+    self_id: N::NodeIdType,
     /// Mode of the cluster
     mode: RwLock<InstanceMode>,
     /// [ServiceInstance] representing current cluster node
@@ -105,7 +135,8 @@ where
         }
     }
 
-    pub fn get_id(&self) -> &String {
+    /// Get the cluster instance ID
+    pub fn get_id(&self) -> &N::NodeIdType {
         &self.self_id
     }
 
@@ -126,7 +157,7 @@ where
             let guard = self.secondaries.read().await;
             Some(guard.clone())
         } else {
-            info!("[node: {}] not a primary node", &self.self_id);
+            info!("[node: {}] not a primary node", self.self_id);
             None
         }
     }
@@ -138,7 +169,7 @@ where
             let guard = self.primaries.read().await;
             Some(guard.clone())
         } else {
-            info!("[node: {}] not a secondary node", &self.self_id);
+            info!("[node: {}] not a secondary node", self.self_id);
             None
         }
     }
@@ -168,7 +199,7 @@ where
     pub async fn accept_raft_request_vote(&self, requester_node_id: String, term: usize) {
         self.send_message_to_raft(Message::RequestVote {
             term,
-            requester_node_id,
+            requester_node_id: requester_node_id.into(),
         })
         .await;
     }
@@ -182,7 +213,7 @@ where
     /// Forward [almost_raft::Message::HeartBeat] message to Raft process
     pub async fn accept_raft_heartbeat(&self, leader_node_id: String, term: usize) {
         self.send_message_to_raft(Message::HeartBeat {
-            leader_node_id,
+            leader_node_id: leader_node_id.into(),
             term,
         })
         .await;
@@ -191,7 +222,7 @@ where
     async fn send_message_to_raft(&self, msg: Message<N>) {
         trace!(
             "[node: {}] sending messages to raft: {:?}",
-            &self.self_id,
+            self.self_id,
             &msg
         );
         let guard = self.raft_tx.read().await;
@@ -210,7 +241,7 @@ where
 impl<N: ClusterNode> Default for Cluster<N> {
     fn default() -> Self {
         Cluster {
-            self_id: uuid::Uuid::new_v4().to_string(),
+            self_id: N::NodeIdType::from(uuid::Uuid::new_v4().to_string()),
             mode: RwLock::from(InstanceMode::Inactive),
             self_: Default::default(),
             primaries: Default::default(),
@@ -268,7 +299,7 @@ pub async fn start_cluster<T, N, InfoFut>(
     <N as almost_raft::ClusterNode>::NodeType: std::marker::Send,
     InfoFut: Future<Output = Result<(ClusterInfo, ServiceInstance), anyhow::Error>>,
 {
-    info!("[node: {}] starting cluster...", &cluster.self_id);
+    info!("[node: {}] starting cluster...", cluster.self_id);
     let raft_tx_timeout = 15;
 
     let (tx, mut raft_rx) = mpsc::channel::<Message<N>>(20);
@@ -291,7 +322,10 @@ pub async fn start_cluster<T, N, InfoFut>(
         *write_guard = Some(raft_tx.clone());
     }
 
-    info!("[node: {}] spawning raft election...", &cluster.self_id);
+    info!(
+        "[node: {}] spawning raft election...",
+        cluster.self_id
+    );
     tokio::spawn(raft_election(raft));
 
     let mut remaining_update_interval = config.update_interval;
@@ -306,7 +340,8 @@ pub async fn start_cluster<T, N, InfoFut>(
     loop {
         debug!(
             "[node: {}] update timeout: {}",
-            &cluster.self_id, &remaining_update_interval
+            cluster.self_id,
+            &remaining_update_interval
         );
         //get message from raft or time to check discovery service
         let start_time = Instant::now();
@@ -327,7 +362,10 @@ pub async fn start_cluster<T, N, InfoFut>(
         }
         remaining_update_interval = config.update_interval;
 
-        debug!("[node: {}] calling discovery service.", &cluster.self_id);
+        debug!(
+            "[node: {}] calling discovery service.",
+            cluster.self_id
+        );
         let instances = if let Ok(instance) = discovery_service.get_instances().await {
             instance
         } else {
@@ -336,18 +374,18 @@ pub async fn start_cluster<T, N, InfoFut>(
 
         debug!(
             "[node: {}] discovered {} instances",
-            &cluster.self_id,
+            cluster.self_id,
             instances.len()
         );
         trace!(
             "[node: {}] discovered instances: {:?}",
-            &cluster.self_id,
+            cluster.self_id,
             &instances
         );
 
         // collect cluster info
         let mut requests = FuturesUnordered::new();
-        let mut current_instances = HashSet::new();
+        let mut current_instances = HashSet::with_capacity(instances.len());
         for instance in instances {
             let id = if instance.instance_id().is_some() {
                 instance.instance_id().clone().unwrap()
@@ -357,6 +395,8 @@ pub async fn start_cluster<T, N, InfoFut>(
             };
 
             let already_discovered = discovered.contains_key(&id);
+            //todo add node id to current instances instead of service id, and add to current instances only if could get info
+            // but there are potential pitfalls like how do I detect removed nodes vs new nodes
             current_instances.insert(id);
             //no need to get info if already discovered
             if already_discovered {
@@ -373,11 +413,11 @@ pub async fn start_cluster<T, N, InfoFut>(
                 Ok((info, instance)) => {
                     trace!(
                         "[node: {}] cluster info {:?} from {:?}",
-                        &cluster.self_id,
+                        cluster.self_id,
                         &info,
                         &instance
                     );
-                    if info.node_id == cluster.self_id {
+                    if info.node_id == cluster.self_id.to_string() { //todo fix it
                         {
                             let mut guard = cluster.self_.write().await;
                             guard.replace(instance.clone());
@@ -385,11 +425,15 @@ pub async fn start_cluster<T, N, InfoFut>(
                         //is it need to add self to raft? or only peers.
                         // Ans: Only peers, use self id to identify itself
                     }
-                    let node = new_node(info.node_id, instance);
+                    let node = new_node(info.node_id.to_string(), instance);
                     if cluster.self_id != *node.node_id() {
-                        new_nodes.insert(node.service_instance_id().clone());
+                        new_nodes.insert(node.node_id().clone());
                         //todo handle failure
-                        debug!("[node: {}] new node found: {:?}", &cluster.self_id, &node);
+                        debug!(
+                            "[node: {}] new ClusterNode found: {:?}",
+                            cluster.self_id,
+                            &node
+                        );
                         let result = raft_tx
                             .send_timeout(
                                 Message::ControlAddNode(node.clone()),
@@ -398,12 +442,12 @@ pub async fn start_cluster<T, N, InfoFut>(
                             .await;
                         log_error!(result);
                     }
-                    discovered.insert(node.service_instance_id().clone(), node);
+                    discovered.insert(node.node_id().to_string(), node);
                 }
                 Err(err) => {
                     error!(
                         "[node: {}] error getting cluster info: {}",
-                        &cluster.self_id,
+                        cluster.self_id,
                         err.to_string()
                     );
                 }
@@ -413,10 +457,18 @@ pub async fn start_cluster<T, N, InfoFut>(
         let mut removed_nodes = HashSet::new();
         // remove if not exists in newly discovered instance list
         for (key, val) in discovered.iter() {
-            if !current_instances.contains(val.service_instance_id()) {
+            if !current_instances.contains(&val.node_id().to_string()) { //todo it's wrong, fix it
                 removed_nodes.insert(key.clone());
             }
         }
+
+        trace!(
+            "[node: {}] discovered: {:?}, current instances: {:?}, removed nodes: {:?}",
+            cluster.self_id,
+            &discovered,
+            &current_instances,
+            &removed_nodes
+        );
 
         if !new_nodes.is_empty() || !removed_nodes.is_empty() {
             //update secondaries
@@ -439,14 +491,14 @@ pub async fn start_cluster<T, N, InfoFut>(
                 }
             }
             for node in new_nodes {
-                if let Some(node) = discovered.get(&node) {
+                if let Some(node) = discovered.get(&node.to_string()) { //todo it's wrong, fix it
                     current.insert(node.clone());
                 }
             }
             {
                 trace!(
                     "[node: {}] updating secondaries to: {:?}",
-                    &cluster.self_id,
+                    cluster.self_id,
                     &current
                 );
                 let mut write_guard = cluster.secondaries.write().await;
@@ -489,7 +541,8 @@ async fn handle_control_message_from_raft<N>(
 {
     info!(
         "[node: {}] control message from raft: {:?}",
-        cluster.self_id, &msg
+        cluster.self_id,
+        &msg
     );
     if let Some(Message::ControlLeaderChanged(node_id)) = msg {
         let mut node = None;
@@ -526,7 +579,7 @@ pub async fn get_cluster_info<N: ClusterNode>(cluster: Arc<Cluster<N>>) -> Clust
     };
     ClusterInfo {
         instance: node,
-        node_id: cluster.self_id.clone(),
+        node_id: cluster.self_id.to_string(),
     }
 }
 
@@ -540,8 +593,20 @@ pub struct ClusterInfo {
 }
 
 /// A wrapper to avoid confusion between RestClusterNode ID & ServiceInstance ID
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RestClusterNodeId(String);
+
+impl Display for RestClusterNodeId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl From<String> for RestClusterNodeId {
+    fn from(value: String) -> Self {
+        RestClusterNodeId(value)
+    }
+}
 
 impl Deref for RestClusterNodeId {
     type Target = String;
@@ -637,6 +702,8 @@ impl RestClusterNode {
 impl ClusterNode for RestClusterNode {
     type NodeType = RestClusterNode;
 
+    type NodeIdType = RestClusterNodeId;
+
     async fn send_message(&self, msg: Message<Self::NodeType>) {
         debug!(
             "[RestClusterNode: {}] message from raft: {:?}",
@@ -647,7 +714,7 @@ impl ClusterNode for RestClusterNode {
                 requester_node_id,
                 term,
             } => {
-                let result = self.send_request_vote(requester_node_id, term).await;
+                let result = self.send_request_vote(requester_node_id.0, term).await;
                 log_error!(result);
             }
             Message::RequestVoteResponse { vote, term } => {
@@ -658,20 +725,20 @@ impl ClusterNode for RestClusterNode {
                 leader_node_id,
                 term,
             } => {
-                let result = self.send_heartbeat(leader_node_id, term).await;
+                let result = self.send_heartbeat(leader_node_id.0, term).await;
                 log_error!(result);
             }
             _ => {}
         }
     }
 
-    fn node_id(&self) -> &String {
+    fn node_id(&self) -> &RestClusterNodeId {
         &self.node_id
     }
 
-    fn service_instance_id(&self) -> &String {
-        self.inner.instance_id().as_ref().unwrap_or(&self.node_id)
-    }
+    // fn service_instance_id(&self) -> &String {
+    //     self.inner.instance_id().as_ref().unwrap_or(&self.node_id)
+    // }
 }
 
 impl RestClusterNode {
@@ -693,7 +760,7 @@ impl RestClusterNode {
 
 impl PartialEq for RestClusterNode {
     fn eq(&self, other: &Self) -> bool {
-        self.node_id.eq(&*other.node_id)
+        self.node_id.eq(&other.node_id)
     }
 }
 
