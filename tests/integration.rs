@@ -42,12 +42,12 @@ async fn test_mpsc_cluster() {
     let config = ClusterConfig {
         connection_timeout: 10,
         election_timeout: 100,
-        update_interval: 300,
+        update_interval: 100,
         max_node: NonZeroUsize::new(10).unwrap(),
         min_node: NonZeroUsize::new(4).unwrap(),
     };
 
-    let mut discovery_service = common::MpscDiscoveryService::new();
+    let discovery_service = common::MpscDiscoveryService::new();
 
     let discovery_client = DiscoveryClient::new(discovery_service.clone());
     let cluster_instance = create_cluster_instance(config.clone(), discovery_client).await;
@@ -71,7 +71,6 @@ async fn test_mpsc_cluster() {
             .unwrap()
             .insert(service_instance_id, cluster_instance.clone());
     }
-    tokio::time::sleep(Duration::from_secs(1000)).await;
 
     let discovery_client = DiscoveryClient::new(discovery_service.clone());
     let cluster_instance = create_cluster_instance(config.clone(), discovery_client).await;
@@ -83,7 +82,29 @@ async fn test_mpsc_cluster() {
             .unwrap()
             .insert(service_instance_id, cluster_instance.clone());
     }
-    tokio::time::sleep(Duration::from_secs(1000)).await;
+    let discovery_client = DiscoveryClient::new(discovery_service.clone());
+    let cluster_instance_4 = create_cluster_instance(config.clone(), discovery_client).await;
+    let service_instance_id = uuid::Uuid::new_v4().to_string();
+    discovery_service.register(service_instance_id.clone());
+    {
+        SERVICE_INSTANCE_TO_CLUSTER
+            .write()
+            .unwrap()
+            .insert(service_instance_id, cluster_instance_4.clone());
+    }
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    // let primaries = cluster_instance_4.primaries().await;
+    // let secondaries = cluster_instance_4.secondaries().await;
+    assert!(cluster_instance_4.primaries().await.is_some() || cluster_instance_4.secondaries().await.is_some());
+    
+    //get primary & secondary for later tests
+    
+    // let primary = primary.iter().next().unwrap().clone();
+    // assert!(secondaries.is_some());
+    // let secondaries = secondaries.unwrap();
+    // assert_eq!(secondaries.len(), 3);
+
+    // add new nodes, should be connected to cluster as secondaries
     let discovery_client = DiscoveryClient::new(discovery_service.clone());
     let cluster_instance = create_cluster_instance(config.clone(), discovery_client).await;
     let service_instance_id = uuid::Uuid::new_v4().to_string();
@@ -94,8 +115,19 @@ async fn test_mpsc_cluster() {
             .unwrap()
             .insert(service_instance_id, cluster_instance.clone());
     }
-
-    tokio::time::sleep(Duration::from_secs(100000)).await;
+    // tokio::time::sleep(Duration::from_secs(5)).await;
+    // let new_primaries = cluster_instance.primaries().await;
+    // assert!(new_primaries.is_some());
+    // let new_primary = new_primaries.unwrap();
+    // let new_primary = new_primary.iter().next().unwrap().clone();
+    // assert_eq!(new_primary, primary);
+    // let secondaries = cluster_instance.secondaries().await;
+    // assert!(secondaries.is_some());
+    // let secondaries = secondaries.unwrap();
+    // assert_eq!(secondaries.len(), 4);
+    // assert!(cluster_instance.is_secondary().await);
+    
+    // tokio::time::sleep(Duration::from_secs(10)).await;
 }
 
 async fn create_cluster_instance(
@@ -182,7 +214,7 @@ async fn start_message_handler(
 // }
 
 pub fn new_node_from_service_instance(
-    node_id: String,
+    node_id: MpscNodeId,
     service_instance: ServiceInstance,
 ) -> MpscNode {
     let (rx, tx) = NODE_ID_NODE_MAP
@@ -202,7 +234,7 @@ fn setup() {
     });
 }
 
-pub async fn get_info(instance: ServiceInstance) -> anyhow::Result<(ClusterInfo, ServiceInstance)> {
+pub async fn get_info(instance: ServiceInstance) -> anyhow::Result<(ClusterInfo<MpscNode>, ServiceInstance)> {
     let id = instance.instance_id().clone().unwrap();
     let cluster = SERVICE_INSTANCE_TO_CLUSTER
         .read()
@@ -211,7 +243,7 @@ pub async fn get_info(instance: ServiceInstance) -> anyhow::Result<(ClusterInfo,
         .unwrap()
         .clone();
     let info = ClusterInfo {
-        node_id: cluster.get_id().to_string(),
+        node_id: cluster.get_id().clone(),
         instance: Some(instance.clone()),
     };
     Ok((info, instance))

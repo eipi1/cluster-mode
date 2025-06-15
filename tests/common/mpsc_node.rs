@@ -9,16 +9,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::RwLock;
 
-// #[derive(Debug, Clone, PartialEq, Eq)]
-// pub struct NodeId(String);
-// impl Deref for NodeId {
-//     type Target = String;
-//
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
-
 type MpscNodeRx = Arc<RwLock<Receiver<almost_raft::Message<MpscNode>>>>;
 
 #[derive(Debug, Clone)]
@@ -54,12 +44,12 @@ impl MpscNode {
         (node, tx, rx)
     }
     pub fn new_node_from(
-        node_id: String,
+        node_id: MpscNodeId,
         tx: Sender<Message<MpscNode>>,
         rx: MpscNodeRx,
     ) -> MpscNode {
         MpscNode {
-            node_id: MpscNodeId(node_id),
+            node_id,
             rx,
             tx,
         }
