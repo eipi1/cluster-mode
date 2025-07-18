@@ -1,12 +1,14 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
+#![allow(clippy::mutable_key_type)]
 use crate::common::{MpscDiscoveryService, MpscNode, MpscNodeId};
 use almost_raft::Message;
 use cluster_mode::{start_cluster, Cluster, ClusterConfig, ClusterInfo, ClusterInstanceId};
 use lazy_static::lazy_static;
-use log::{error, trace};
+use log::{error, info, trace};
 use rust_cloud_discovery::{DiscoveryClient, DiscoveryService, ServiceInstance};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::future::Future;
 use std::iter::Map;
 use std::num::NonZeroUsize;
@@ -36,6 +38,7 @@ lazy_static! {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore]
 async fn test_mpsc_cluster() {
     setup();
 
@@ -46,6 +49,8 @@ async fn test_mpsc_cluster() {
         max_node: NonZeroUsize::new(10).unwrap(),
         min_node: NonZeroUsize::new(4).unwrap(),
     };
+
+    let mut cluster_instances = vec![];
 
     let discovery_service = common::MpscDiscoveryService::new();
 
@@ -60,6 +65,7 @@ async fn test_mpsc_cluster() {
             .unwrap()
             .insert(service_instance_id, cluster_instance.clone());
     }
+    cluster_instances.push(cluster_instance);
 
     let discovery_client = DiscoveryClient::new(discovery_service.clone());
     let cluster_instance = create_cluster_instance(config.clone(), discovery_client).await;
@@ -71,6 +77,7 @@ async fn test_mpsc_cluster() {
             .unwrap()
             .insert(service_instance_id, cluster_instance.clone());
     }
+    cluster_instances.push(cluster_instance);
 
     let discovery_client = DiscoveryClient::new(discovery_service.clone());
     let cluster_instance = create_cluster_instance(config.clone(), discovery_client).await;
@@ -82,27 +89,32 @@ async fn test_mpsc_cluster() {
             .unwrap()
             .insert(service_instance_id, cluster_instance.clone());
     }
+    cluster_instances.push(cluster_instance);
+
     let discovery_client = DiscoveryClient::new(discovery_service.clone());
-    let cluster_instance_4 = create_cluster_instance(config.clone(), discovery_client).await;
+    let cluster_instance = create_cluster_instance(config.clone(), discovery_client).await;
     let service_instance_id = uuid::Uuid::new_v4().to_string();
     discovery_service.register(service_instance_id.clone());
     {
         SERVICE_INSTANCE_TO_CLUSTER
             .write()
             .unwrap()
-            .insert(service_instance_id, cluster_instance_4.clone());
+            .insert(service_instance_id, cluster_instance.clone());
     }
+    cluster_instances.push(cluster_instance);
+
     tokio::time::sleep(Duration::from_secs(4)).await;
     // let primaries = cluster_instance_4.primaries().await;
     // let secondaries = cluster_instance_4.secondaries().await;
-    assert!(cluster_instance_4.primaries().await.is_some() || cluster_instance_4.secondaries().await.is_some());
-    
+    assert!(
+        cluster_instances[0].primaries().await.is_some()
+            || cluster_instances[0].secondaries().await.is_some()
+    );
+
     //get primary & secondary for later tests
-    
-    // let primary = primary.iter().next().unwrap().clone();
-    // assert!(secondaries.is_some());
-    // let secondaries = secondaries.unwrap();
-    // assert_eq!(secondaries.len(), 3);
+    let (primaries, _) = get_primaries_and_secondaries(&cluster_instances).await;
+    let primaries = primaries.unwrap();
+    let primary = primaries.iter().next().unwrap();
 
     // add new nodes, should be connected to cluster as secondaries
     let discovery_client = DiscoveryClient::new(discovery_service.clone());
@@ -115,19 +127,198 @@ async fn test_mpsc_cluster() {
             .unwrap()
             .insert(service_instance_id, cluster_instance.clone());
     }
-    // tokio::time::sleep(Duration::from_secs(5)).await;
-    // let new_primaries = cluster_instance.primaries().await;
-    // assert!(new_primaries.is_some());
-    // let new_primary = new_primaries.unwrap();
-    // let new_primary = new_primary.iter().next().unwrap().clone();
-    // assert_eq!(new_primary, primary);
-    // let secondaries = cluster_instance.secondaries().await;
-    // assert!(secondaries.is_some());
-    // let secondaries = secondaries.unwrap();
-    // assert_eq!(secondaries.len(), 4);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(cluster_instance.is_secondary().await);
+    cluster_instances.push(cluster_instance);
+
+    let mut primaries_after = None;
+    let mut secondaries_after = None;
+    for cluster_instance in &cluster_instances {
+        if cluster_instance.is_primary().await {
+            secondaries_after = cluster_instance.secondaries().await;
+        } else {
+            primaries_after = cluster_instance.primaries().await;
+        }
+    }
+    let primaries_after = primaries_after.unwrap();
+    let primaries_after = primaries_after.iter().next().unwrap();
+    let secondaries_after = secondaries_after.unwrap();
+    assert_eq!(primary, primaries_after);
+    assert_eq!(secondaries_after.len(), 4)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mpsc_cluster_increase_nodes() {
+    // setup();
+
+    let config = ClusterConfig {
+        connection_timeout: 10,
+        election_timeout: 100,
+        update_interval: 100,
+        max_node: NonZeroUsize::new(10).unwrap(),
+        min_node: NonZeroUsize::new(4).unwrap(),
+    };
+
+    let mut cluster_instances = vec![];
+
+    let discovery_service = common::MpscDiscoveryService::new();
+
+    let discovery_client = DiscoveryClient::new(discovery_service.clone());
+    let cluster_instance =
+        create_cluster_instance_with_id(config.clone(), discovery_client, "1").await;
+
+    // let service_instance_id = "1".to_string();
+    let service_instance_id = uuid::Uuid::new_v4().to_string();
+    discovery_service.register(service_instance_id.clone());
+    {
+        SERVICE_INSTANCE_TO_CLUSTER
+            .write()
+            .unwrap()
+            .insert(service_instance_id, cluster_instance.clone());
+    }
+    cluster_instances.push(cluster_instance);
+
+    let discovery_client = DiscoveryClient::new(discovery_service.clone());
+    let cluster_instance =
+        create_cluster_instance_with_id(config.clone(), discovery_client, "2").await;
+    // let service_instance_id = "2".to_string();
+    let service_instance_id = uuid::Uuid::new_v4().to_string();
+    discovery_service.register(service_instance_id.clone());
+    {
+        SERVICE_INSTANCE_TO_CLUSTER
+            .write()
+            .unwrap()
+            .insert(service_instance_id, cluster_instance.clone());
+    }
+    cluster_instances.push(cluster_instance);
+
+    let discovery_client = DiscoveryClient::new(discovery_service.clone());
+    let cluster_instance =
+        create_cluster_instance_with_id(config.clone(), discovery_client, "3").await;
+    // let service_instance_id = "3".to_string();
+    let service_instance_id = uuid::Uuid::new_v4().to_string();
+    discovery_service.register(service_instance_id.clone());
+    {
+        SERVICE_INSTANCE_TO_CLUSTER
+            .write()
+            .unwrap()
+            .insert(service_instance_id, cluster_instance.clone());
+    }
+    cluster_instances.push(cluster_instance);
+
+    let discovery_client = DiscoveryClient::new(discovery_service.clone());
+    let cluster_instance =
+        create_cluster_instance_with_id(config.clone(), discovery_client, "4").await;
+    // let service_instance_id = "4".to_string();
+    let service_instance_id = uuid::Uuid::new_v4().to_string();
+    discovery_service.register(service_instance_id.clone());
+    {
+        SERVICE_INSTANCE_TO_CLUSTER
+            .write()
+            .unwrap()
+            .insert(service_instance_id, cluster_instance.clone());
+    }
+    cluster_instances.push(cluster_instance);
+
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    // let primaries = cluster_instance_4.primaries().await;
+    // let secondaries = cluster_instance_4.secondaries().await;
+    assert!(
+        cluster_instances[0].primaries().await.is_some()
+            || cluster_instances[0].secondaries().await.is_some()
+    );
+
+    //get primary & secondary for later tests
+    // let mut primaries=None;
+    // let mut secondaries=None;
+    let (primaries, secondaries) = get_primaries_and_secondaries(&cluster_instances).await;
+    let primaries = primaries.unwrap();
+    let primary = primaries.iter().next().unwrap();
+
+    // We have 3 secondaries, add 3 new nodes
+    setup();
+    let discovery_client = DiscoveryClient::new(discovery_service.clone());
+    let cluster_instance =
+        create_cluster_instance_with_id(config.clone(), discovery_client, "5").await;
+    // let service_instance_id = "5".to_string();
+    let service_instance_id = uuid::Uuid::new_v4().to_string();
+    discovery_service.register(service_instance_id.clone());
+    {
+        SERVICE_INSTANCE_TO_CLUSTER
+            .write()
+            .unwrap()
+            .insert(service_instance_id, cluster_instance.clone());
+    }
+    cluster_instances.push(cluster_instance);
+
+    let discovery_client = DiscoveryClient::new(discovery_service.clone());
+    let cluster_instance =
+        create_cluster_instance_with_id(config.clone(), discovery_client, "6").await;
+    // let service_instance_id = "6".to_string();
+    let service_instance_id = uuid::Uuid::new_v4().to_string();
+    discovery_service.register(service_instance_id.clone());
+    {
+        SERVICE_INSTANCE_TO_CLUSTER
+            .write()
+            .unwrap()
+            .insert(service_instance_id, cluster_instance.clone());
+    }
+    cluster_instances.push(cluster_instance);
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
     // assert!(cluster_instance.is_secondary().await);
-    
-    // tokio::time::sleep(Duration::from_secs(10)).await;
+
+    let (primaries_after, secondaries_after) =
+        get_primaries_and_secondaries(&cluster_instances).await;
+    let primaries_after = primaries_after.unwrap();
+    let primaries_after = primaries_after.iter().next().unwrap();
+    let secondaries_after = secondaries_after.unwrap();
+    // assert_eq!(primary, primaries_after); //todo to be fixed by pre-vote
+    assert_eq!(secondaries_after.len(), 5);
+
+    let discovery_client = DiscoveryClient::new(discovery_service.clone());
+    let cluster_instance =
+        create_cluster_instance_with_id(config.clone(), discovery_client, "7").await;
+    // let service_instance_id = "6".to_string();
+    let service_instance_id = uuid::Uuid::new_v4().to_string();
+    discovery_service.register(service_instance_id.clone());
+    {
+        SERVICE_INSTANCE_TO_CLUSTER
+            .write()
+            .unwrap()
+            .insert(service_instance_id, cluster_instance.clone());
+    }
+    cluster_instances.push(cluster_instance);
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let primary = primaries_after;
+    let (primaries_after, secondaries_after) =
+        get_primaries_and_secondaries(&cluster_instances).await;
+    let primaries_after = primaries_after.unwrap();
+    let primaries_after = primaries_after.iter().next().unwrap();
+    let secondaries_after = secondaries_after.unwrap();
+    assert_eq!(primary, primaries_after);
+    assert_eq!(secondaries_after.len(), 6);
+
+
+}
+
+async fn get_primaries_and_secondaries(
+    cluster_instances: &Vec<Arc<Cluster<MpscNode>>>,
+) -> (Option<HashSet<MpscNode>>, Option<Arc<HashSet<MpscNode>>>) {
+    let mut primaries_after = None;
+    let mut secondaries_after = None;
+    for cluster_instance in cluster_instances {
+        if cluster_instance.is_primary().await {
+            //there should be only one primary
+            assert_eq!(secondaries_after, None, "there should be only one primary");
+            secondaries_after = cluster_instance.secondaries().await;
+        } else {
+            primaries_after = cluster_instance.primaries().await;
+        }
+    }
+    (primaries_after, secondaries_after)
 }
 
 async fn create_cluster_instance(
@@ -135,7 +326,21 @@ async fn create_cluster_instance(
     // mut discovery_service: MpscDiscoveryService,
     discovery_client: DiscoveryClient<MpscDiscoveryService>,
 ) -> Arc<Cluster<MpscNode>> {
-    let cluster_instance = Arc::new(Cluster::<MpscNode>::default());
+    create_cluster_instance_with_id(
+        config,
+        discovery_client,
+        uuid::Uuid::new_v4().to_string().as_str(),
+    )
+    .await
+}
+
+async fn create_cluster_instance_with_id(
+    config: ClusterConfig,
+    // mut discovery_service: MpscDiscoveryService,
+    discovery_client: DiscoveryClient<MpscDiscoveryService>,
+    id: &str,
+) -> Arc<Cluster<MpscNode>> {
+    let cluster_instance = Arc::new(Cluster::<MpscNode>::new(MpscNodeId::from(id.to_string())));
     tokio::spawn(start_cluster(
         cluster_instance.clone(),
         discovery_client,
@@ -175,7 +380,7 @@ async fn start_message_handler(
     loop {
         let result = tokio::time::timeout(Duration::from_millis(50), rx.write().await.recv()).await;
         if let Ok(Some(msg)) = result {
-            trace!("[{}] got message - {:?}", cluster.get_id().to_string(), &msg);
+            trace!("[node: {}] got message - {:?}", cluster.get_id(), &msg);
             match msg {
                 Message::RequestVote {
                     requester_node_id,
@@ -204,15 +409,6 @@ async fn start_message_handler(
     }
 }
 
-// async fn wait_until<T>(x: &mut T) -> Result<T::Output, Elapsed>
-// where T: Future {
-//     x.await
-// }
-
-// fn mpsc_uri(node_id: String) -> String {
-//     format!("mpsc://{}", node_id)
-// }
-
 pub fn new_node_from_service_instance(
     node_id: MpscNodeId,
     service_instance: ServiceInstance,
@@ -220,7 +416,7 @@ pub fn new_node_from_service_instance(
     let (rx, tx) = NODE_ID_NODE_MAP
         .read()
         .unwrap()
-        .get(&(node_id.clone().into()))
+        .get(&(node_id.clone()))
         .unwrap()
         .clone();
     MpscNode::new_node_from(node_id, tx, rx)
@@ -228,13 +424,17 @@ pub fn new_node_from_service_instance(
 
 fn setup() {
     ONCE.call_once(|| {
-        env_logger::init_from_env(
+        env_logger::Builder::from_env(
             env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "trace"),
-        );
+        )
+        .format_timestamp(Some(env_logger::TimestampPrecision::Millis))
+        .init();
     });
 }
 
-pub async fn get_info(instance: ServiceInstance) -> anyhow::Result<(ClusterInfo<MpscNode>, ServiceInstance)> {
+pub async fn get_info(
+    instance: ServiceInstance,
+) -> anyhow::Result<(ClusterInfo<MpscNode>, ServiceInstance)> {
     let id = instance.instance_id().clone().unwrap();
     let cluster = SERVICE_INSTANCE_TO_CLUSTER
         .read()

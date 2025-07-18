@@ -1,8 +1,9 @@
-use std::fmt::{Display, Formatter};
 use almost_raft::{ClusterNode, Message};
 use async_trait::async_trait;
+use derivative::Derivative;
 use log::{error, trace};
 use rust_cloud_discovery::ServiceInstance;
+use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -11,10 +12,14 @@ use tokio::sync::RwLock;
 
 type MpscNodeRx = Arc<RwLock<Receiver<almost_raft::Message<MpscNode>>>>;
 
-#[derive(Debug, Clone)]
+#[derive(Derivative)]
+#[derivative(Debug)]
+#[derive(Clone)]
 pub struct MpscNode {
     pub node_id: MpscNodeId,
+    #[derivative(Debug = "ignore")]
     pub rx: MpscNodeRx,
+    #[derivative(Debug = "ignore")]
     pub tx: Sender<almost_raft::Message<Self>>,
 }
 
@@ -48,11 +53,7 @@ impl MpscNode {
         tx: Sender<Message<MpscNode>>,
         rx: MpscNodeRx,
     ) -> MpscNode {
-        MpscNode {
-            node_id,
-            rx,
-            tx,
-        }
+        MpscNode { node_id, rx, tx }
     }
 }
 
@@ -77,7 +78,11 @@ impl ClusterNode for MpscNode {
     type NodeIdType = MpscNodeId;
 
     async fn send_message(&self, msg: Message<Self::NodeType>) {
-        trace!("sending message to [{}] - msg: {:?}", self.node_id, msg);
+        trace!(
+            "[node: {}] sending message to raft - msg: {:?}",
+            self.node_id,
+            msg
+        );
         if let Err(e) = self.tx.send(msg).await {
             error!("[{}] error sending message: {:?}", self.node_id, e);
         }
