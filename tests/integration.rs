@@ -300,8 +300,6 @@ async fn test_mpsc_cluster_increase_nodes() {
     let secondaries_after = secondaries_after.unwrap();
     assert_eq!(primary, primaries_after);
     assert_eq!(secondaries_after.len(), 6);
-
-
 }
 
 async fn get_primaries_and_secondaries(
