@@ -1,8 +1,9 @@
 [package]
 name = "cluster-mode"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Md Sarowar Alam <sarowar.cse@gmail.com>"]
-edition = "2018"
+edition = "2021"
+rust-version = "1.70"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/eipi1/cluster-mode"
@@ -19,18 +20,15 @@ version = "0.2"
 version = "0.2"
 
 [dependencies.almost-raft]
-version = "0.3"
+version = "0.4"
 
 [dependencies.uuid]
-version = "1.2"
+version = "1.17"
 features = ["v4"]
 
-[dependencies.rand]
-version = "0.8"
-
 [dependencies.tokio]
-version = "1.9"
-features = ["time", "sync", "test-util", "macros"]
+version = "1.46"
+features = ["time", "sync", "test-util", "macros", "rt-multi-thread"]
 
 [dependencies.tokio-stream]
 version = "0.1"
@@ -60,18 +58,17 @@ version = "0.14"
 [dependencies.hyper-tls]
 version = "0.5"
 
-[dependencies.bytes]
-version = "1.0"
-
 [dependencies.log]
 version = "0.4"
 
 [dependencies.anyhow]
 version = "1.0"
 
-[dev-dependencies.lazy_static]
-version = "1.4"
+[dev-dependencies.derivative]
+version = "2.2.0"
 
-[dev-dependencies.tracing-subscriber]
-version = "0.3.16"
-features = ["fmt"]
+[dev-dependencies.lazy_static]
+version = "1.5"
+
+[dev-dependencies.env_logger]
+version = "0.11"

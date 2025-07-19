@@ -26,13 +26,18 @@ or `async fn is_active(&self) -> bool` to communicate with the cluster.
 Checkout [doc.rs][doc-cluster-mode-cluster]
 
 ## How Cluster Mode works
-`cluster-mode` handles three task -
-* Discovery
-* Consensus
+
+`cluster-mode` handles three components -
+* Service Discovery
+* Consensus(Raft) 
 * The Cluster
 
-### Discovery
-It uses [rust-cloud-discovery] crate for discovery service. Given a valid implementation of the 
+TODO: change to flowchart
+
+![image info](./docs/cluster-node.jpg)
+
+### Service Discovery
+It uses [rust-cloud-discovery] crate to discover nodes, each node represented by type `ServiceInstance`. Given a valid implementation of the 
 crate, cluster-mode should be able to handle the addition of a new node or termination of an 
 existing or unreachable node.
 
