@@ -230,7 +230,8 @@ where
         .await;
     }
 
-    async fn send_message_to_raft(&self, msg: Message<N>) {
+    /// Forward [almost_raft::Message] to Raft
+    pub async fn send_message_to_raft(&self, msg: Message<N>) {
         trace!(
             "[node: {}] forwarding messages to raft: {:?}",
             self.self_id,
@@ -304,7 +305,7 @@ pub async fn start_cluster<T, N, InfoFut>(
     let (raft, raft_tx) = RaftElectionState::init(
         cluster.self_id.clone(),
         config.election_timeout,
-        config.connection_timeout,
+        config.election_timeout / 2,
         500,
         vec![],
         tx.clone(),
@@ -582,7 +583,7 @@ pub struct ClusterInfo<N: ClusterNode> {
 }
 
 /// A wrapper to avoid confusion between RestClusterNode ID & ServiceInstance ID
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RestClusterNodeId(String);
 
 impl Display for RestClusterNodeId {

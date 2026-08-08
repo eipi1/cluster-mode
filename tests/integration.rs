@@ -38,7 +38,6 @@ lazy_static! {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore]
 async fn test_mpsc_cluster() {
     setup();
 
@@ -116,6 +115,7 @@ async fn test_mpsc_cluster() {
     let primaries = primaries.unwrap();
     let primary = primaries.iter().next().unwrap();
 
+    info!("adding 5th node");
     // add new nodes, should be connected to cluster as secondaries
     let discovery_client = DiscoveryClient::new(discovery_service.clone());
     let cluster_instance = create_cluster_instance(config.clone(), discovery_client).await;
@@ -399,8 +399,8 @@ async fn start_message_handler(
                         .accept_raft_heartbeat(leader_node_id.to_string(), term)
                         .await;
                 }
-                _ => {
-                    error!("Unexpected message")
+                v => {
+                    cluster.send_message_to_raft(v).await;
                 }
             }
         }

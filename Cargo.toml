@@ -20,7 +20,8 @@ version = "0.2"
 version = "0.2"
 
 [dependencies.almost-raft]
-version = "0.4"
+#version = "0.4"
+path = "../almost-raft"
 
 [dependencies.uuid]
 version = "1.17"
