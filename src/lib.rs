@@ -47,7 +47,7 @@ use http::Request;
 use hyper::client::{Client, HttpConnector};
 use hyper::Body;
 use hyper_tls::HttpsConnector;
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use native_tls::TlsConnector;
 use rust_cloud_discovery::{DiscoveryClient, DiscoveryService, ServiceInstance};
 use serde::{Deserialize, Serialize};
@@ -149,7 +149,7 @@ where
 
     #[doc(hidden)]
     /// For testing purpose
-    pub(crate) fn _new(mode: InstanceMode, secondaries: HashSet<N>) -> Self {
+    pub fn _new(mode: InstanceMode, secondaries: HashSet<N>) -> Self {
         Cluster {
             self_id: N::NodeIdType::from(uuid::Uuid::new_v4().to_string()),
             mode: RwLock::new(mode),
@@ -215,9 +215,24 @@ where
         .await;
     }
 
+    /// Forward [almost_raft::Message::RequestVote] message to Raft process
+    pub async fn accept_raft_request_pre_vote(&self, requester_node_id: String, term: usize) {
+        self.send_message_to_raft(Message::RequestPreVote {
+            term,
+            requester_node_id: requester_node_id.into(),
+        })
+        .await;
+    }
+
     /// Forward [almost_raft::Message::RequestVoteResponse] message to Raft process
     pub async fn accept_raft_request_vote_resp(&self, term: usize, vote: bool) {
         self.send_message_to_raft(Message::RequestVoteResponse { term, vote })
+            .await;
+    }
+
+    /// Forward [almost_raft::Message::PreVoteResponse] message to Raft process
+    pub async fn accept_raft_request_pre_vote_resp(&self, term: usize, vote: bool) {
+        self.send_message_to_raft(Message::PreVoteResponse { term, vote })
             .await;
     }
 
@@ -253,8 +268,8 @@ where
 #[derive(Debug, Clone)]
 /// Set cluster configurations
 pub struct ClusterConfig {
-    /// connection timeout in milliseconds between cluster nodes
-    pub connection_timeout: u64,
+    /// message timeout in milliseconds between cluster nodes
+    pub message_timeout: u64,
     /// Approximate interval in milliseconds between attempts to elect new leader node.
     /// Application will use a randomly chosen value between *election_timeout* and
     /// *election_timeout\*2*
@@ -270,7 +285,7 @@ pub struct ClusterConfig {
 impl Default for ClusterConfig {
     fn default() -> Self {
         ClusterConfig {
-            connection_timeout: 10 * 1000,
+            message_timeout: 500,
             election_timeout: 30 * 1000,
             update_interval: 10 * 1000,
             max_node: NonZeroUsize::new(20).unwrap(),
@@ -305,15 +320,16 @@ pub async fn start_cluster<T, N, InfoFut>(
     let (raft, raft_tx) = RaftElectionState::init(
         cluster.self_id.clone(),
         config.election_timeout,
-        config.election_timeout / 2,
-        500,
+        config.election_timeout / 3,
+        config.message_timeout,
         vec![],
         tx.clone(),
         config.max_node.get(),
         // almost_raft doesn't count itself in number of peers/nodes,
         // so should subtract one.
         config.min_node.get() - 1,
-    );
+    )
+    .unwrap();
 
     {
         let mut write_guard = cluster.raft_tx.write().await;
@@ -661,6 +677,28 @@ impl RestClusterNode {
         .await
     }
 
+    async fn send_request_pre_vote(&self, node_id: String, term: usize) -> anyhow::Result<()> {
+        self.send_raft_request(format!(
+            "{}{}/{}/{}",
+            self.inner.uri().clone().unwrap(),
+            PATH_RAFT_REQUEST_PRE_VOTE,
+            node_id,
+            term
+        ))
+        .await
+    }
+
+    async fn send_request_pre_vote_response(&self, vote: bool, term: usize) -> anyhow::Result<()> {
+        self.send_raft_request(format!(
+            "{}{}/{}/{}",
+            self.inner.uri().clone().unwrap(),
+            PATH_RAFT_PRE_VOTE,
+            term,
+            vote
+        ))
+        .await
+    }
+
     async fn send_heartbeat(&self, leader_node_id: String, term: usize) -> anyhow::Result<()> {
         self.send_raft_request(format!(
             "{}{}/{}/{}",
@@ -721,7 +759,26 @@ impl ClusterNode for RestClusterNode {
                 let result = self.send_heartbeat(leader_node_id.0, term).await;
                 log_error!(result);
             }
-            _ => {}
+            Message::RequestPreVote {
+                requester_node_id,
+                term,
+            } => {
+                let result = self.send_request_pre_vote(requester_node_id.0, term).await;
+                log_error!(result);
+            }
+            Message::PreVoteResponse { term, vote } => {
+                let result = self.send_request_pre_vote_response(vote, term).await;
+                log_error!(result);
+            }
+            Message::ControlAddNode(_) => {
+                warn!("[RestClusterNode] unexpected message from raft: Message::ControlAddNode");
+            }
+            Message::ControlRemoveNode(_) => {
+                warn!("[RestClusterNode] unexpected message from raft: Message::ControlRemoveNode");
+            }
+            Message::ControlLeaderChanged(_) => {
+                warn!("[RestClusterNode] unexpected message from raft: Message::CtrlLeaderChanged");
+            }
         }
     }
 
@@ -770,6 +827,10 @@ const PATH_INFO: &str = "/cluster/info";
 const PATH_RAFT_REQUEST_VOTE: &str = "/cluster/raft/request-vote";
 /// /cluster/raft/vote/{term}/{true|false}
 const PATH_RAFT_VOTE: &str = "/cluster/raft/vote";
+/// /cluster/raft/request-vote/{requester_node_id}/{term}
+const PATH_RAFT_REQUEST_PRE_VOTE: &str = "/cluster/raft/request-pre-vote";
+/// /cluster/raft/vote/{term}/{true|false}
+const PATH_RAFT_PRE_VOTE: &str = "/cluster/raft/pre-vote";
 /// /cluster/raft/beat/{leader_node_id}/{term}
 const PATH_RAFT_HEARTBEAT: &str = "/cluster/raft/beat";
 

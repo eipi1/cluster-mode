@@ -1,6 +1,6 @@
 [package]
 name = "cluster-mode"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Md Sarowar Alam <sarowar.cse@gmail.com>"]
 edition = "2021"
 rust-version = "1.70"

@@ -42,7 +42,7 @@ async fn test_mpsc_cluster() {
     setup();
 
     let config = ClusterConfig {
-        connection_timeout: 10,
+        message_timeout: 10,
         election_timeout: 100,
         update_interval: 100,
         max_node: NonZeroUsize::new(10).unwrap(),
@@ -152,7 +152,7 @@ async fn test_mpsc_cluster_increase_nodes() {
     // setup();
 
     let config = ClusterConfig {
-        connection_timeout: 10,
+        message_timeout: 10,
         election_timeout: 100,
         update_interval: 100,
         max_node: NonZeroUsize::new(10).unwrap(),
@@ -221,22 +221,14 @@ async fn test_mpsc_cluster_increase_nodes() {
     cluster_instances.push(cluster_instance);
 
     tokio::time::sleep(Duration::from_secs(4)).await;
-    // let primaries = cluster_instance_4.primaries().await;
-    // let secondaries = cluster_instance_4.secondaries().await;
-    assert!(
-        cluster_instances[0].primaries().await.is_some()
-            || cluster_instances[0].secondaries().await.is_some()
-    );
+    let (primaries, secondaries) = get_primaries_and_secondaries(&cluster_instances).await;
+    assert!(primaries.is_some() || secondaries.is_some());
 
     //get primary & secondary for later tests
-    // let mut primaries=None;
-    // let mut secondaries=None;
-    let (primaries, secondaries) = get_primaries_and_secondaries(&cluster_instances).await;
     let primaries = primaries.unwrap();
     let primary = primaries.iter().next().unwrap();
 
-    // We have 3 secondaries, add 3 new nodes
-    setup();
+    // We have 3 secondaries, add 5 new nodes
     let discovery_client = DiscoveryClient::new(discovery_service.clone());
     let cluster_instance =
         create_cluster_instance_with_id(config.clone(), discovery_client, "5").await;
@@ -265,17 +257,6 @@ async fn test_mpsc_cluster_increase_nodes() {
     }
     cluster_instances.push(cluster_instance);
 
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    // assert!(cluster_instance.is_secondary().await);
-
-    let (primaries_after, secondaries_after) =
-        get_primaries_and_secondaries(&cluster_instances).await;
-    let primaries_after = primaries_after.unwrap();
-    let primaries_after = primaries_after.iter().next().unwrap();
-    let secondaries_after = secondaries_after.unwrap();
-    // assert_eq!(primary, primaries_after); //todo to be fixed by pre-vote
-    assert_eq!(secondaries_after.len(), 5);
-
     let discovery_client = DiscoveryClient::new(discovery_service.clone());
     let cluster_instance =
         create_cluster_instance_with_id(config.clone(), discovery_client, "7").await;
@@ -290,16 +271,42 @@ async fn test_mpsc_cluster_increase_nodes() {
     }
     cluster_instances.push(cluster_instance);
 
+    let discovery_client = DiscoveryClient::new(discovery_service.clone());
+    let cluster_instance =
+        create_cluster_instance_with_id(config.clone(), discovery_client, "8").await;
+    let service_instance_id = uuid::Uuid::new_v4().to_string();
+    discovery_service.register(service_instance_id.clone());
+    {
+        SERVICE_INSTANCE_TO_CLUSTER
+            .write()
+            .unwrap()
+            .insert(service_instance_id, cluster_instance.clone());
+    }
+    cluster_instances.push(cluster_instance);
+
+    let discovery_client = DiscoveryClient::new(discovery_service.clone());
+    let cluster_instance =
+        create_cluster_instance_with_id(config.clone(), discovery_client, "9").await;
+    let service_instance_id = uuid::Uuid::new_v4().to_string();
+    discovery_service.register(service_instance_id.clone());
+    {
+        SERVICE_INSTANCE_TO_CLUSTER
+            .write()
+            .unwrap()
+            .insert(service_instance_id, cluster_instance.clone());
+    }
+    cluster_instances.push(cluster_instance);
+
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let primary = primaries_after;
+    // let primary = primaries_after;
     let (primaries_after, secondaries_after) =
         get_primaries_and_secondaries(&cluster_instances).await;
     let primaries_after = primaries_after.unwrap();
     let primaries_after = primaries_after.iter().next().unwrap();
     let secondaries_after = secondaries_after.unwrap();
-    assert_eq!(primary, primaries_after);
-    assert_eq!(secondaries_after.len(), 6);
+    assert_eq!(primary, primaries_after); //sometimes fail here, but don't want primary to be change here.
+    assert_eq!(secondaries_after.len(), 8);
 }
 
 async fn get_primaries_and_secondaries(
